@@ -19,6 +19,9 @@ permissions:
 
 env:
   AWS_REGION: ap-south-1
+  # Terraform names ECR repositories "<project>/<name>" (infra-terraform/modules/ecr),
+  # e.g. ai-sre-agent/order-service. Keep this equal to the Terraform `project` variable.
+  ECR_NAMESPACE: ai-sre-agent
 
 jobs:
   ###########################################################################
@@ -92,8 +95,8 @@ jobs:
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           TAG="sha-${SHORT_SHA}"
           REGISTRY="${{ steps.ecr-login.outputs.registry }}"
-          URI="${REGISTRY}/${{ matrix.repo_name }}:${TAG}"
-          LATEST_URI="${REGISTRY}/${{ matrix.repo_name }}:latest"
+          URI="${REGISTRY}/${ECR_NAMESPACE}/${{ matrix.repo_name }}:${TAG}"
+          LATEST_URI="${REGISTRY}/${ECR_NAMESPACE}/${{ matrix.repo_name }}:latest"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "uri=${URI}" >> "$GITHUB_OUTPUT"
           echo "latest_uri=${LATEST_URI}" >> "$GITHUB_OUTPUT"
@@ -144,19 +147,20 @@ jobs:
           REGISTRY="${{ steps.ecr-login.outputs.registry }}"
 
           # Update order-service
-          sed -i.bak "s|image:.*|image: ${REGISTRY}/order-service:${TAG}|g" gitops/apps/order-service/deployment.yaml || true
+          sed -i.bak "s|image:.*|image: ${REGISTRY}/${ECR_NAMESPACE}/order-service:${TAG}|g" gitops/apps/order-service/deployment.yaml || true
           rm -f gitops/apps/order-service/deployment.yaml.bak
 
           # Update product-service
-          sed -i.bak "s|image:.*|image: ${REGISTRY}/product-service:${TAG}|g" gitops/apps/product-service/deployment.yaml || true
+          sed -i.bak "s|image:.*|image: ${REGISTRY}/${ECR_NAMESPACE}/product-service:${TAG}|g" gitops/apps/product-service/deployment.yaml || true
           rm -f gitops/apps/product-service/deployment.yaml.bak
 
           # Update sre-agent
-          sed -i.bak "s|image:.*|image: ${REGISTRY}/ai-sre-agent:${TAG}|g" gitops/apps/sre-agent/deployment.yaml || true
+          sed -i.bak "s|image:.*|image: ${REGISTRY}/${ECR_NAMESPACE}/ai-sre-agent:${TAG}|g" gitops/apps/sre-agent/deployment.yaml || true
           rm -f gitops/apps/sre-agent/deployment.yaml.bak
 
       - name: Commit & Push GitOps Changes
         run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add gitops/apps/

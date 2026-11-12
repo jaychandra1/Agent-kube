@@ -51,6 +51,7 @@ resource "aws_eip_association" "k3s" {
 # User-Data script
 # Runs on first boot:
 #   1. Update packages & install awscli, jq
+#   1b. Install the ECR kubelet credential provider (private ECR image pulls)
 #   2. Install k3s (latest stable)
 #   3. Wait for the API server to become healthy
 #   4. Patch the kubeconfig to use the EIP
@@ -68,6 +69,38 @@ locals {
     #---------------------------------------------------------------------------
     dnf update -y
     dnf install -y --allowerasing awscli jq git
+
+    #---------------------------------------------------------------------------
+    # 1b. ECR credential provider
+    #     Private ECR needs a login token for every image pull. The kubelet
+    #     runs this plugin to get one, using this instance's IAM role (which
+    #     has AmazonEC2ContainerRegistryReadOnly), so no imagePullSecrets are
+    #     needed. Must be in place before k3s starts.
+    #---------------------------------------------------------------------------
+    CRED_DIR=/var/lib/rancher/credentialprovider
+    mkdir -p "$CRED_DIR/bin" /etc/rancher/k3s
+    curl -fsSL --retry 5 --retry-delay 5 -o "$CRED_DIR/bin/ecr-credential-provider" \
+      "https://artifacts.k8s.io/binaries/cloud-provider-aws/${var.ecr_credential_provider_version}/linux/amd64/ecr-credential-provider-linux-amd64"
+    chmod 0755 "$CRED_DIR/bin/ecr-credential-provider"
+
+    cat > "$CRED_DIR/config.yaml" <<'EOF'
+    apiVersion: kubelet.config.k8s.io/v1
+    kind: CredentialProviderConfig
+    providers:
+      - name: ecr-credential-provider
+        matchImages:
+          - "*.dkr.ecr.*.amazonaws.com"
+          - "*.dkr.ecr.*.amazonaws.com.cn"
+        defaultCacheDuration: "12h"
+        apiVersion: credentialprovider.kubelet.k8s.io/v1
+    EOF
+
+    # k3s reads this file at startup and passes the flags to its kubelet
+    cat > /etc/rancher/k3s/config.yaml <<'EOF'
+    kubelet-arg:
+      - "image-credential-provider-config=/var/lib/rancher/credentialprovider/config.yaml"
+      - "image-credential-provider-bin-dir=/var/lib/rancher/credentialprovider/bin"
+    EOF
 
     #---------------------------------------------------------------------------
     # 2. Install k3s

@@ -13,8 +13,19 @@ from tools import (
 
 logger = logging.getLogger("sre-agent.agent")
 
-MODEL = os.getenv("AGENT_MODEL", "claude-3-5-sonnet-20241022")
+MODEL = os.getenv("AGENT_MODEL", "claude-opus-5-5")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+# Thinking depth and token spend: low | medium | high | xhigh | max.
+# Set to "" for older models that don't accept the effort setting.
+EFFORT = os.getenv("AGENT_EFFORT", "high").strip()
+# Server-side refusal fallback: with "default", a request the model declines is
+# re-run on Anthropic's recommended fallback model inside the same API call.
+# Set to "off" for models or platforms that don't support it.
+FALLBACKS = os.getenv("AGENT_FALLBACKS", "default").strip()
+USE_FALLBACKS = FALLBACKS.lower() not in ("", "off", "none", "false", "0")
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+MAX_TOKENS = 16000
+RCA_STEPS = 14  # model calls allowed per RCA investigation
 
 client = None
 if ANTHROPIC_KEY:
@@ -39,12 +50,16 @@ Rules:
 RCA_TOOL = {
     "name": "submit_rca",
     "description": "Submit the final Root Cause Analysis. Only include facts supported by tool output.",
+    # strict: the API guarantees the tool input matches this schema exactly,
+    # so the report template always gets every field it renders.
+    "strict": True,
     "input_schema": {
         "type": "object",
+        "additionalProperties": False,
         "required": [
             "title", "severity", "summary", "impact", "affected_services",
-            "timeline", "root_cause", "evidence", "resolution", "prevention",
-            "confidence", "stakeholder_summary"
+            "timeline", "root_cause", "evidence", "contributing_factors",
+            "resolution", "prevention", "confidence", "stakeholder_summary"
         ],
         "properties": {
             "title": {"type": "string"},
@@ -56,6 +71,7 @@ RCA_TOOL = {
                 "type": "array",
                 "items": {
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {"time": {"type": "string"}, "event": {"type": "string"}},
                     "required": ["time", "event"]
                 }
@@ -65,6 +81,7 @@ RCA_TOOL = {
                 "type": "array",
                 "items": {
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {"source": {"type": "string"}, "excerpt": {"type": "string"}},
                     "required": ["source", "excerpt"]
                 }
@@ -88,25 +105,47 @@ def _append_user(messages, text):
     else:
         messages.append({"role": "user", "content": text})
 
+def _create(messages, tools):
+    """One Messages API call with the agent's standard settings.
+
+    Thinking is left at the model's default (current models think adaptively).
+    Callers send back the full response content, thinking blocks included, and
+    only append to the history; trim_history is the one place that cuts it."""
+    params = {
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "system": SYSTEM,
+        "tools": tools,
+        "messages": messages,
+    }
+    if EFFORT:
+        params["output_config"] = {"effort": EFFORT}
+    if USE_FALLBACKS:
+        return client.beta.messages.create(betas=[FALLBACK_BETA], fallbacks=FALLBACKS, **params)
+    return client.messages.create(**params)
+
+def _text(resp) -> str:
+    return "".join(b.text for b in resp.content if b.type == "text")
+
+def _tool_results(resp) -> list:
+    """Run every tool the model asked for; all results go back in one user message."""
+    return [
+        {"type": "tool_result", "tool_use_id": b.id, "content": call_tool(b.name, b.input)}
+        for b in resp.content if b.type == "tool_use"
+    ]
+
 def run_loop(messages, max_steps=12) -> str:
     if not client:
         return "Anthropic client is not configured. Running in rule-based mode."
     for _ in range(max_steps):
-        resp = client.messages.create(
-            model=MODEL,
-            max_tokens=4096,
-            system=SYSTEM,
-            tools=TOOL_SCHEMAS,
-            messages=messages
-        )
-        messages.append({"role": "assistant", "content": resp.content})
+        resp = _create(messages, TOOL_SCHEMAS)
+        if resp.content:
+            messages.append({"role": "assistant", "content": resp.content})
+        if resp.stop_reason == "refusal":
+            return "The model declined this request. Try rephrasing it, or call /rca for a rule-based report."
         if resp.stop_reason != "tool_use":
-            return "".join(b.text for b in resp.content if b.type == "text")
-        results = [
-            {"type": "tool_result", "tool_use_id": b.id, "content": call_tool(b.name, b.input)}
-            for b in resp.content if b.type == "tool_use"
-        ]
-        messages.append({"role": "user", "content": results})
+            return _text(resp)
+        messages.append({"role": "user", "content": _tool_results(resp)})
     return "Stopped: step limit reached before a conclusion."
 
 def chat(messages, user_text) -> str:
@@ -120,6 +159,40 @@ def chat(messages, user_text) -> str:
             return (f"[Heuristic SRE Analyzer] Found {len(issues)} unhealthy pod(s) across cluster: "
                     f"{json.dumps(issues, indent=2)}. You can invoke /rca to generate a full incident report.")
         return "[Heuristic SRE Analyzer] All allowlisted namespaces report healthy pods."
+
+def _block_type(block):
+    return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+
+def _is_plain_user_turn(msg) -> bool:
+    """A user message that carries no tool_result, i.e. a safe place to start a history."""
+    if msg["role"] != "user":
+        return False
+    content = msg["content"]
+    return isinstance(content, str) or all(_block_type(b) != "tool_result" for b in content)
+
+def trim_history(messages: list, keep: int = 20) -> list:
+    """Shorten a chat history to about `keep` messages without breaking API rules.
+
+    The cut is placed at a plain user turn, so no tool_result loses its tool_use.
+    Every thinking block is removed from what is kept: a thinking block's
+    signature covers the history before it, which trimming changes, and the API
+    rejects such blocks. Removing all of them is allowed."""
+    if len(messages) <= keep:
+        return messages
+    starts = [i for i, m in enumerate(messages) if i > 0 and _is_plain_user_turn(m)]
+    later = [i for i in starts if i >= len(messages) - keep]
+    start = later[0] if later else (starts[-1] if starts else 0)
+    if start == 0:
+        return messages
+    kept = []
+    for m in messages[start:]:
+        if m["role"] == "assistant" and isinstance(m["content"], list):
+            blocks = [b for b in m["content"] if _block_type(b) not in ("thinking", "redacted_thinking")]
+            if not blocks:
+                continue
+            m = {"role": "assistant", "content": blocks}
+        kept.append(m)
+    return kept
 
 def generate_heuristic_rca(target_issue: str = "") -> dict:
     """Intelligent automated RCA generator analyzing live cluster states, logs, and events."""
@@ -273,28 +346,55 @@ def generate_heuristic_rca(target_issue: str = "") -> dict:
                                 f"Immediate remediation steps have been recommended to restore full service health.")
     }
 
+RCA_INSTRUCTIONS = ("Investigate with the tools, then call the submit_rca tool exactly once with the final RCA. "
+                    "Base it only on evidence from tool output. Do not write the RCA as plain text.")
+RCA_NUDGE = "Call submit_rca now with the final RCA, based only on the evidence gathered above."
+
+def _llm_rca(question: str) -> dict:
+    """Tool-use loop that ends when Claude calls submit_rca.
+
+    Current models (such as claude-opus-5-5) reject a forced tool_choice, so the
+    prompt asks for submit_rca, and the loop nudges the model when it stops
+    without calling it or is about to run out of steps."""
+    tools = [*TOOL_SCHEMAS, RCA_TOOL]
+    messages = [{"role": "user", "content": f"{question}\n\n{RCA_INSTRUCTIONS}"}]
+    for step in range(RCA_STEPS):
+        resp = _create(messages, tools)
+        if resp.stop_reason not in ("tool_use", "end_turn"):
+            raise RuntimeError(f"model stopped with stop_reason={resp.stop_reason}")
+        messages.append({"role": "assistant", "content": resp.content})
+        for b in resp.content:
+            if b.type == "tool_use" and b.name == "submit_rca":
+                return dict(b.input)
+        if resp.stop_reason == "tool_use":
+            content = _tool_results(resp)
+            if step >= RCA_STEPS - 3:
+                content.append({"type": "text", "text": RCA_NUDGE})
+        else:
+            content = RCA_NUDGE
+        messages.append({"role": "user", "content": content})
+    raise RuntimeError(f"no submit_rca call after {RCA_STEPS} model calls")
+
 def investigate_and_rca(question: str) -> dict:
-    """Execute LLM agent loop with tools, or fallback to heuristic analyzer if LLM is unavailable."""
+    """Run the Claude investigation, or fall back to the heuristic analyzer.
+
+    The result says which engine produced it ("generated_by"), and carries the
+    reason in "llm_error" when the Claude path failed, so a fallback is visible."""
+    llm_error = None
     if client:
         try:
             logger.info("Starting LLM-driven RCA investigation with model %s", MODEL)
-            messages = [{"role": "user", "content": question}]
-            run_loop(messages)
-            _append_user(messages, "Now call submit_rca with the final RCA, based only on the evidence gathered above.")
-            resp = client.messages.create(
-                model=MODEL,
-                max_tokens=4096,
-                system=SYSTEM,
-                tools=[*TOOL_SCHEMAS, RCA_TOOL],
-                tool_choice={"type": "tool", "name": "submit_rca"},
-                messages=messages
-            )
-            for b in resp.content:
-                if b.type == "tool_use" and b.name == "submit_rca":
-                    logger.info("LLM successfully submitted structured RCA")
-                    return b.input
+            rca = _llm_rca(question)
+            logger.info("LLM successfully submitted structured RCA")
+            rca["generated_by"] = f"llm:{MODEL}"
+            return rca
         except Exception as e:
-            logger.warning("LLM investigation encountered error: %s. Falling back to heuristic analyzer.", e)
+            llm_error = f"{type(e).__name__}: {e}"
+            logger.warning("LLM investigation failed (%s). Falling back to heuristic analyzer.", llm_error)
 
     logger.info("Using automated heuristic cluster analyzer for RCA")
-    return generate_heuristic_rca(question)
+    rca = generate_heuristic_rca(question)
+    rca["generated_by"] = "heuristic"
+    if llm_error:
+        rca["llm_error"] = llm_error[:500]
+    return rca

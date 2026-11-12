@@ -43,6 +43,9 @@ def main():
         print(f"    Severity: {rca_data.get('severity')}")
         print(f"    Title:    {rca_data.get('title')}")
         print(f"    Root Cause: {rca_data.get('root_cause')}")
+        print(f"    Engine:   {rca_data.get('generated_by')}")
+        if rca_data.get("llm_error"):
+            print(f"    LLM error (fell back to heuristics): {rca_data['llm_error']}")
 
         if args.email:
             print(f"==> Sending email notification to {args.email} with HTML attachment...")

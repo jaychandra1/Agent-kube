@@ -43,6 +43,12 @@ variable "k3s_version" {
   default     = ""
 }
 
+variable "ecr_credential_provider_version" {
+  description = "Release of the Kubernetes cloud-provider-aws ecr-credential-provider installed on the node (lets the kubelet pull from private ECR)"
+  type        = string
+  default     = "v1.31.0"
+}
+
 variable "public_key_material" {
   description = "SSH public key material. Leave empty to skip key pair creation."
   type        = string

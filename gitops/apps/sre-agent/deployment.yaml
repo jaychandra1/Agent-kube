@@ -28,6 +28,8 @@ spec:
         env:
         - name: ALLOWED_NAMESPACES
           value: "default,apps,ai-agent,argocd,kube-system"
+        - name: AGENT_MODEL
+          value: "claude-opus-5-5"
         - name: SES_SENDER
           value: "alerts@example.com"
         - name: AWS_REGION

@@ -51,7 +51,7 @@ echo " Password:   ${ADMIN_PWD}"
 echo "=========================================================="
 echo ""
 echo "To sync all platform applications via ArgoCD App-of-Apps:"
-echo "  1. Update REPLACE_WITH_GITHUB_REPO in gitops/argocd/*.yaml with your repo URL"
+echo "  1. Check that repoURL in gitops/argocd/*.yaml points at your repository (and push it)"
 echo "  2. Run: kubectl apply -f gitops/argocd/root-application.yaml"
 echo "=========================================================="
 

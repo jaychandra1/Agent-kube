@@ -166,6 +166,7 @@
         <div class="meta-item">Confidence: <b>{{ r.confidence | upper }}</b></div>
         <div class="meta-item">Affected Services: <b>{{ r.affected_services | join(", ") }}</b></div>
         <div class="meta-item">Generated: <b>{{ generated }}</b></div>
+        {% if r.generated_by %}<div class="meta-item">Engine: <b>{{ r.generated_by }}</b></div>{% endif %}
       </div>
     </div>
 

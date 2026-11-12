@@ -97,6 +97,7 @@ echo "$RCA_RESPONSE" | jq -r '
   "Severity:    " + .rca.severity + "\n" +
   "Confidence:  " + .rca.confidence + "\n" +
   "Root Cause:  " + .rca.root_cause + "\n" +
+  "Engine:      " + (.rca.generated_by // "unknown") + "\n" +
   "Report File: " + .report_file + "\n" +
   "Emailed:     " + (.emailed | tostring)
 ' 2>/dev/null || echo "$RCA_RESPONSE"

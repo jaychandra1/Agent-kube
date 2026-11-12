@@ -50,7 +50,7 @@ def chat(body: ChatIn, x_api_key: str = Header(None)):
     msgs = SESSIONS.setdefault(sid, [])
     answer = agent.chat(msgs, body.message)
     if len(msgs) > 40:
-        SESSIONS[sid] = msgs[-20:] if msgs[-20]["role"] == "user" else msgs[-19:]
+        SESSIONS[sid] = agent.trim_history(msgs, keep=20)
     return {"session_id": sid, "answer": answer}
 
 @app.post("/rca")
