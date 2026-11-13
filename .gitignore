@@ -18,14 +18,6 @@ build/
 *.pem
 *.key
 
-# ── Terraform ────────────────────────────────────────────────
-**/.terraform/
-**/.terraform.lock.hcl
-**/terraform.tfstate
-**/terraform.tfstate.backup
-**/*.tfvars
-!**/*.tfvars.example
-**/crash.log
 
 # ── Docker ───────────────────────────────────────────────────
 *.tar

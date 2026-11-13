@@ -1,0 +1,85 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# kubesupport activity webhook.  DON'T apply this file directly: run
+#   deploy/webhook-cert.sh
+# which creates the TLS certificate, fills in <CA_BUNDLE> below and applies it.
+#
+# The Kubernetes API server sends kubesupport a copy of the requests matched below
+# (exec/attach/port-forward, created/deleted services, apps, jobs, namespaces, RBAC,
+# ServiceAccounts, Secrets, ConfigMaps, and workload updates/scaling), including WHO made them.
+# kubesupport always answers "allowed"; failurePolicy: Ignore means requests go ahead even
+# if kubesupport is down or slow. Nothing is ever blocked or changed.
+#
+# Secrets: the API server includes the whole object in the request; kubesupport keeps only
+# the name. If Secret objects must never reach kubesupport, remove "secrets" from the
+# second rule below and re-run deploy/webhook-cert.sh.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubesupport-webhook
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kubesupport
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook        # container port 8443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: kubesupport-activity
+  labels:
+    app.kubernetes.io/name: kubesupport
+webhooks:
+  - name: activity.kubesupport.local
+    admissionReviewVersions: ["v1"]
+    sideEffects: NoneOnDryRun     # dry-run requests are ignored by kubesupport
+    failurePolicy: Ignore         # never block anything, even when kubesupport is down
+    timeoutSeconds: 3
+    matchPolicy: Equivalent
+    clientConfig:
+      service:
+        name: kubesupport-webhook
+        namespace: kubesupport
+        path: /admission
+        port: 443
+      caBundle: <CA_BUNDLE>
+    rules:
+      # Executions: someone opened a shell, attached to, or tunnelled into a pod
+      - operations: ["CONNECT"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+      # New/deleted services and namespaces; security objects (names only)
+      - operations: ["CREATE", "DELETE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["services", "namespaces", "serviceaccounts", "configmaps", "secrets"]
+      # Apps: created/deleted, and updates (image changes, replicas)
+      - operations: ["CREATE", "UPDATE", "DELETE"]
+        apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        resources: ["deployments", "statefulsets", "daemonsets"]
+      # Scaling with `kubectl scale` (the /scale subresource)
+      - operations: ["UPDATE"]
+        apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        resources: ["deployments/scale", "statefulsets/scale"]
+      - operations: ["CREATE", "DELETE"]
+        apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        resources: ["jobs", "cronjobs"]
+      - operations: ["CREATE", "DELETE"]
+        apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        resources: ["ingresses"]
+      # Permission changes
+      - operations: ["CREATE", "UPDATE", "DELETE"]
+        apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]

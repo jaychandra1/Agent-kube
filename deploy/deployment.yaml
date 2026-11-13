@@ -1,0 +1,233 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# kubesupport: everything it needs, in one file.
+#
+# Before applying, edit two things (search for "EDIT"):
+#   1. The image: your Docker Hub user/org.
+#   2. The ConfigMap: CLUSTER_NAME (and ALLOWED_NAMESPACES if you want alerts for some namespaces only).
+# Create the Secret "kubesupport-secrets" first (Configuration.md, step 5), then:
+#   kubectl apply -f deploy/deployment.yaml
+# For activity notices (exec, new services, RBAC changes, ...) also run deploy/webhook-cert.sh.
+#
+# Permissions: kubesupport can READ every object in the cluster, in every namespace, except
+# Secrets. It cannot create, change or delete anything.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesupport
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport
+---
+# ── PERMISSIONS: cluster-wide, read-only, never Secrets ──────────────────────
+# 1. Kubernetes' built-in "view" role, in every namespace: pods, logs, services, endpoints,
+#    ingresses, deployments, statefulsets, jobs, cronjobs, configmaps, PVCs, HPAs, network
+#    policies, events, ... (and the custom resources that register with "view").
+#    By design "view" never includes Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubesupport-view
+  labels:
+    app.kubernetes.io/name: kubesupport
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: kubesupport
+    namespace: kubesupport
+---
+# 2. What "view" leaves out: cluster-level objects and RBAC, plus (explicitly) everything
+#    kubesupport's own tools read. Still read-only, still no Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesupport-cluster-read
+  labels:
+    app.kubernetes.io/name: kubesupport
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, services, endpoints, nodes, namespaces, persistentvolumes]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [get, list, watch]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings, clusterroles, clusterrolebindings]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses, csidrivers, csinodes, volumeattachments]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingressclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [get, list, watch]
+  - apiGroups: [apiregistration.k8s.io]
+    resources: [apiservices]
+    verbs: [get, list, watch]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations]
+    verbs: [get, list, watch]
+  - apiGroups: [scheduling.k8s.io]
+    resources: [priorityclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [node.k8s.io]
+    resources: [runtimeclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods, nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubesupport-cluster-read
+  labels:
+    app.kubernetes.io/name: kubesupport
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubesupport-cluster-read
+subjects:
+  - kind: ServiceAccount
+    name: kubesupport
+    namespace: kubesupport
+---
+# ── SETTINGS ─────────────────────────────────────────────────────────────────
+# After changing these: kubectl apply -f deploy/deployment.yaml && kubectl -n kubesupport rollout restart deploy/kubesupport
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubesupport-config
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport
+data:
+  CLUSTER_NAME: ""                 # EDIT: shown on every Teams message, e.g. "prod-eks"
+  ALLOWED_NAMESPACES: "*"          # namespaces for incident alerts and Teams answers; "*" = all (permissions are cluster-wide either way)
+  AGENT_MODEL: "claude-opus-5-5"   # Claude model (used only when ANTHROPIC_API_KEY is set)
+  AGENT_EFFORT: "high"             # low | medium | high | xhigh | max (lower = cheaper, faster)
+  AGENT_FALLBACKS: "default"       # refusal fallback; "off" to disable
+  WATCH_ENABLED: "true"            # "false" = no incident alerts (questions still work)
+  WATCH_INTERVAL_SECONDS: "60"     # how often the cluster is checked for failing pods
+  ALERT_COOLDOWN_MINUTES: "60"     # reminder for a still-open incident at most this often
+  RESOLVE_AFTER_MINUTES: "10"      # incident must be gone this long before "Resolved" is sent
+  PENDING_GRACE_MINUTES: "5"       # a pod Pending longer than this is an incident
+  MAX_LLM_RCA_PER_HOUR: "10"       # Claude RCAs per hour for alerts; then rule-based RCAs
+  ACTIVITY_ENABLED: "true"         # activity notices (needs deploy/webhook-cert.sh); "false" to switch off
+  ACTIVITY_BATCH_SECONDS: "60"     # activity is grouped into one Teams card per this many seconds
+  ACTIVITY_IGNORE_USERS: "system:node:,system:kube-,system:apiserver,system:serviceaccount:kube-system:,eks:,system:serviceaccount:kubesupport:"  # callers whose actions are not reported (prefixes)
+  ACTIVITY_IGNORE_NAMESPACES: "kube-node-lease"  # namespaces whose activity is not reported
+  TEAMS_TENANT_ID: ""              # optional: only answer Teams messages from this Entra tenant
+  TEAMS_ALLOWED_USER_IDS: ""       # optional: comma-separated Entra object IDs allowed to ask
+  REPORT_DIR: "/tmp/reports"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesupport
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport
+spec:
+  replicas: 1                      # always 1: the incident watcher and activity feed run inside the pod
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubesupport
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubesupport
+    spec:
+      serviceAccountName: kubesupport
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: docker.io/<dockerhub-user>/kubesupport:latest   # EDIT: your Docker Hub user/org (or pin a sha-xxxxxxx tag)
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: webhook          # activity webhook (HTTPS), called by the Kubernetes API server
+              containerPort: 8443
+          envFrom:
+            - configMapRef:
+                name: kubesupport-config
+            - secretRef:
+                name: kubesupport-secrets   # ANTHROPIC_API_KEY, AGENT_API_KEY, TEAMS_* (Configuration.md, step 5)
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: webhook-tls
+              mountPath: /etc/kubesupport/webhook-tls
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: webhook-tls          # created by deploy/webhook-cert.sh; until then the webhook is simply off
+          secret:
+            secretName: kubesupport-webhook-tls
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubesupport
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kubesupport
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
