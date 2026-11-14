@@ -140,7 +140,8 @@ def alerts_status(x_api_key: str = Header(None)):
             "reply_webhook": teams.REPLY_TARGET[0] if teams.REPLY_TARGET else None,
             "outgoing_webhook": bool(teams.OUTGOING_SECRET),
         },
-        "claude": {"configured": bool(agent.client), "model": agent.MODEL},
+        "llm": {"configured": bool(agent.client), "provider": agent.PROVIDER or None,
+                "model": agent.MODEL or None},
     }
 
 

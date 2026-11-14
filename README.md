@@ -4,7 +4,7 @@
 
 - **Sees the whole cluster, read-only:** every object in every namespace, plus nodes, RBAC and CRDs. Never Secrets, and it never changes anything.
 - **Watches** for crash loops, OOM kills, image-pull failures, config errors, stuck Pending pods and NotReady nodes.
-- **Diagnoses** each new incident: a root cause analysis with Claude, or with built-in rules when no API key is set.
+- **Diagnoses** each new incident: a root cause analysis with an AI model, or with built-in rules when no API key is set. The model can be Groq (free plan available), Claude, or any OpenAI-compatible service.
 - **Alerts your Microsoft Teams chat and channels** (private channels included) with the root cause and fix steps, then a "Resolved" card when it's over.
 - **Reports cluster activity:** once a minute, *who* exec'd into a pod, created or deleted a service or app, changed permissions, or changed an image or replica count.
 - **Answers questions in a Teams channel:** `@kubesupport status`, `@kubesupport get services payments`, `@kubesupport activity`, or any question in plain words.

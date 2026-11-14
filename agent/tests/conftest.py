@@ -1,6 +1,6 @@
 """Test setup: fake environment and helpers to build fake Kubernetes objects.
 
-No cluster, Claude API or Teams webhook is contacted by any test.
+No cluster, AI model API or Teams webhook is contacted by any test.
 """
 import base64
 import os
@@ -11,7 +11,10 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 # Environment must be set before the agent modules are imported.
-os.environ.pop("ANTHROPIC_API_KEY", None)
+for _key in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "LLM_API_KEY", "LLM_BASE_URL", "LLM_PROVIDER", "AGENT_MODEL",
+             "AGENT_EFFORT", "LLM_MAX_STEPS", "LLM_TOOL_OUTPUT_CHARS", "LLM_MAX_REQUEST_CHARS",
+             "LLM_MAX_OUTPUT_TOKENS"):
+    os.environ.pop(_key, None)  # tests start in rules-only mode, whatever the shell has set
 os.environ["ALLOWED_NAMESPACES"] = "default,apps"
 os.environ["WATCH_ENABLED"] = "false"
 TEST_SECRET = base64.b64encode(b"test-outgoing-webhook-secret").decode()

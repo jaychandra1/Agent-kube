@@ -28,7 +28,7 @@ This is the all-in-one guide to the repository: what the agent does, how it work
 kubesupport runs as **one pod inside your EKS cluster**:
 
 - **It watches the cluster.** Every minute it checks the namespaces you choose for pods that are crash-looping, OOM-killed, unable to pull their image, missing a ConfigMap/Secret, stuck Pending, or nodes that are NotReady.
-- **It diagnoses new problems.** For each new incident it produces a root cause analysis (RCA): with **Claude** (when an Anthropic API key is set), or with built-in rules.
+- **It diagnoses new problems.** For each new incident it produces a root cause analysis (RCA): with an **AI model** (Groq, Claude or any OpenAI-compatible service, whichever key you set), or with built-in rules.
 - **It alerts you in Microsoft Teams.** An alert card with the root cause and fix steps goes to your Teams chat (and any channels you add). You get a reminder if the incident is still open after an hour, and a "Resolved" card when it's gone.
 - **It answers questions from Teams.** In a Teams channel you type `@kubesupport status`, `@kubesupport logs payments/api-7d9f8b-x`, or a plain question such as `@kubesupport why does the orders deployment keep restarting?`, and it answers from the live cluster.
 - **It reports cluster activity.** Once a minute, a "Cluster activity" card says **who** exec'd into a pod, created or deleted a service or app, changed permissions, or changed an image or replica count ([4.5](#45-cluster-activity-notices)).
@@ -54,7 +54,7 @@ kubesupport runs as **one pod inside your EKS cluster**:
  │   ├─ :8443 /admission ◀── Kubernetes API server (webhook):       │     │
  │   │     exec, creates, deletes, RBAC, updates, with WHO;          │     │
  │   │     always "allowed" → one activity card per minute ──────────┘     │
- │   ├─ Claude tool-use loop (agent.py) or rule-based diagnosis           │
+ │   ├─ AI tool-use loop (Groq or Claude) or rule-based diagnosis         │
  │   ├─ internal API (ClusterIP): /rca /chat /alerts/* /activity*         │
  │   └─ read-only RBAC ("view" + cluster-read) ──▶ Kubernetes API:        │
  │        every object in every namespace, never Secrets                  │
@@ -66,7 +66,7 @@ kubesupport runs as **one pod inside your EKS cluster**:
 
 **Question flow:** you @mention the agent in a channel → Teams POSTs the message to `https://<your host>/teams/webhook`, signed with HMAC → the agent checks the signature →
 - **quick commands** (`status`, `pods`, `events`, `logs`) are answered in the same thread within Teams' 5-second limit;
-- **slow work** (Claude questions, `rca`) gets "Looking into it…" right away, and the full answer arrives a little later as a card in the channel, through the channel's Workflows webhook.
+- **slow work** (AI questions, `rca`) gets "Looking into it…" right away, and the full answer arrives a little later as a card in the channel, through the channel's Workflows webhook.
 
 **Activity flow:** someone runs `kubectl exec`, creates a Service, changes a ClusterRoleBinding, … → the API server sends kubesupport a copy (who, what, where) on port 8443 → kubesupport answers "allowed" immediately → once a minute everything collected goes to Teams as one "Cluster activity" card.
 
@@ -87,13 +87,14 @@ Agent-kube/
 │   ├── activity.py                 Activity webhook: who exec'd/created/deleted/changed what → one card per minute
 │   ├── watcher.py                  Incident loop: new → RCA → alert; reminders; resolved; startup summary
 │   ├── tools.py                    Read-only Kubernetes tools (incl. any kind of object) + detect_incidents()
-│   ├── agent.py                    Claude tool-use loop → structured RCA; rule-based fallback
+│   ├── agent.py                    AI tool-use loop → structured RCA; provider choice; rule-based fallback
+│   ├── llm_openai.py               Groq / OpenAI-compatible model client: request limits, retries
 │   ├── teams.py                    Teams: HMAC check, commands, 5-second rule, posting cards
 │   ├── cards.py                    Adaptive Cards (alert, resolved, startup, RCA, answer, activity)
 │   ├── report.py, templates/       HTML version of an RCA (internal /rca/latest)
 │   ├── cli.py                      Same features from a terminal
-│   ├── runbooks/                   Short notes Claude can search
-│   ├── tests/                      pytest suite (no cluster, Claude or Teams needed)
+│   ├── runbooks/                   Short notes the AI model can search
+│   ├── tests/                      pytest suite (no cluster, AI model or Teams needed)
 │   ├── Dockerfile, requirements*.txt
 ├── deploy/deployment.yaml          Install with kubectl: namespace, cluster-wide read-only RBAC, settings, Deployment, Service
 ├── deploy/activity-webhook.yaml    Activity webhook (Service + ValidatingWebhookConfiguration); applied by webhook-cert.sh
@@ -133,25 +134,34 @@ Old restarts don't count. A pod that crashed once last week is not an incident; 
 | Still open after `ALERT_COOLDOWN_MINUTES` (60) | Short "Still failing" reminder |
 | Gone for `RESOLVE_AFTER_MINUTES` (10) | "Resolved" card. The delay stops a crash-looping pod, which looks fine between restarts, from flapping. |
 
-RCAs run one at a time. Claude is used for at most `MAX_LLM_RCA_PER_HOUR` alerts per hour (default 10); after that alerts use the rule-based RCA until the hour rolls over. All state is in memory: the agent never writes to the cluster.
+RCAs run one at a time. The AI model is used for at most `MAX_LLM_RCA_PER_HOUR` alerts per hour (default 10); after that alerts use the rule-based RCA until the hour rolls over. All state is in memory: the agent never writes to the cluster.
 
-### 4.2 Diagnosis: Claude or rules
+### 4.2 Diagnosis: AI model or rules
 
-**With Claude** ([`agent._llm_rca`](../agent/agent.py)):
-- Claude gets the question (for alerts: the pod, workload and problem) and up to 14 rounds of read-only tools:
+**With an AI model** ([`agent._llm_rca`](../agent/agent.py)):
+- The model gets the question (for alerts: the pod, workload and problem) and a limited number of rounds of read-only tools (`LLM_MAX_STEPS`: 8 on Groq, 14 on Claude):
   - `list_pods`, `describe_pod`, `get_events`, `get_pod_logs` (including `previous=true` for the crashed container);
   - `get_deployment` (rollout history), `top_pods`, `search_runbooks` (the notes in `agent/runbooks/`), `scan_cluster_for_issues`.
-- It must finish by calling `submit_rca`, whose strict schema guarantees every field the cards need: title, severity SEV1–4, root cause, evidence, resolution, prevention, confidence, a plain-language summary.
-- The default model is `claude-opus-5-5` (`AGENT_MODEL`). Effort is `high` (`AGENT_EFFORT`). The server-side refusal fallback is on (`AGENT_FALLBACKS`).
-- If anything fails (wrong key, refusal, no `submit_rca` after 14 calls), the agent falls back to the rules and says so in `llm_error`.
+- It must finish by calling `submit_rca` with every field the cards need: title, severity SEV1–4, root cause, evidence, resolution, prevention, confidence, a plain-language summary. With Claude a strict schema guarantees the shape. With other models kubesupport checks the answer, fills in missing fields, and rejects an RCA without a title or root cause (`normalize_rca`).
+- If anything fails (wrong key, rate limit, refusal, no `submit_rca` within the step limit), the agent falls back to the rules and says so in `llm_error`.
 
-**Without Claude** ([`agent.generate_heuristic_rca`](../agent/agent.py)): rules look at the pod's container states, last termination, events and logs, and produce one of:
+**Which AI model.** `LLM_PROVIDER` is `auto` by default: the first key found in the Secret, in this order:
+
+| Provider | Key in the Secret | Default `AGENT_MODEL` | Notes |
+|---|---|---|---|
+| Claude | `ANTHROPIC_API_KEY` | `claude-opus-5-5` | Effort `high` (`AGENT_EFFORT`); server-side refusal fallback on (`AGENT_FALLBACKS`) |
+| Groq | `GROQ_API_KEY` | `openai/gpt-oss-120b` | Reasoning effort `medium`. Each request (conversation plus tool definitions) is kept under about 14,000 characters and each reply under 2,500 tokens, so one request fits the free plan's per-minute token limit. Older tool results are shortened first. kubesupport waits and retries on "too many requests"; a request Groq calls too large is resent with less history. When the wait is longer than a minute (daily limit), it gives up at once and the rules take over. |
+| Any OpenAI-compatible service | `LLM_API_KEY`, plus `LLM_BASE_URL` in the ConfigMap | none: set `AGENT_MODEL` | For example OpenAI, or a self-hosted vLLM or Ollama (`http://<host>:11434/v1`, no key needed) |
+
+Other Groq models work too: set `AGENT_MODEL`, e.g. `llama-3.3-70b-versatile` or `openai/gpt-oss-20b`. Answer quality depends on the model.
+
+**Without an AI model** ([`agent.generate_heuristic_rca`](../agent/agent.py)): rules look at the pod's container states, last termination, events and logs, and produce one of:
 - *Image pull failure*, *Container configuration error*, *Pod cannot be scheduled*;
 - *OOMKilled* (SEV1), *Database connection pool exhaustion*;
 - *Crash and restart loop*;
 - or *healthy* when nothing is wrong.
 
-Every RCA carries `generated_by` (`llm:<model>` or `heuristic`), so you always know which one you're reading.
+Every RCA carries `generated_by` (`llm:<provider>:<model>`, e.g. `llm:groq:openai/gpt-oss-120b`, or `heuristic`), so you always know which one you're reading.
 
 ### 4.3 Teams
 
@@ -173,8 +183,9 @@ Optional extra checks: `TEAMS_TENANT_ID` (only your organization) and `TEAMS_ALL
 |---|---|
 | Kubernetes RBAC | Read-only and cluster-wide: the built-in `view` role in every namespace, plus `kubesupport-cluster-read` (nodes, namespaces, volumes, storage, CRDs, RBAC, webhook configurations, metrics). Only `get/list/watch`, **never Secrets**, never writes. |
 | Namespace allowlist | Tools refuse namespaces outside `ALLOWED_NAMESPACES`; Teams users get "not allowed". |
-| Redaction | Passwords, tokens, API keys, AWS access keys and JWTs in logs and in object listings (e.g. ConfigMap values) are replaced by `[REDACTED]` before Claude or Teams sees them. |
-| Prompt-injection guard | All tool output reaches Claude wrapped in `<untrusted_data>`, with instructions never to follow text inside it. |
+| Redaction | Passwords, tokens, API keys, AWS access keys and JWTs in logs and in object listings (e.g. ConfigMap values) are replaced by `[REDACTED]` before the AI model or Teams sees them. |
+| Prompt-injection guard | All tool output reaches the AI model wrapped in `<untrusted_data>`, with instructions never to follow text inside it. |
+| Data sent to the AI provider | With a key set, the question and the (redacted) tool output, such as pod lists, events, log lines and object listings, go to that provider (Groq or Anthropic) over HTTPS. Without a key, nothing leaves the cluster except Teams cards. |
 | Public exposure | Only `/teams/webhook` is exposed (Ingress path `Exact`), and every call needs a valid HMAC. Everything else is ClusterIP. |
 | Internal API | `/rca`, `/chat`, `/alerts/*` require `x-api-key` when `AGENT_API_KEY` is set. |
 | Activity webhook | Always answers "allowed". `failurePolicy: Ignore` and a 3 s timeout mean no API request is ever blocked or noticeably slowed, even when kubesupport is down. HTTPS with its own CA. For Secrets and ConfigMaps only the name is kept. |
@@ -213,7 +224,7 @@ The full checklist, with every command and a check after each step, is in [Confi
    - a Workflows webhook for alerts to your chat;
    - a Workflows webhook for answers in the questions channel;
    - an outgoing webhook "kubesupport" in that channel's team, with callback `https://<host>/teams/webhook`.
-3. **Secret** `kubesupport-secrets` in namespace `kubesupport`, with the keys `ANTHROPIC_API_KEY`, `AGENT_API_KEY`, `TEAMS_ALERT_WEBHOOK_URLS`, `TEAMS_REPLY_WEBHOOK_URL` and `TEAMS_OUTGOING_WEBHOOK_SECRET` (all optional).
+3. **Secret** `kubesupport-secrets` in namespace `kubesupport`, with the keys `GROQ_API_KEY` (or `ANTHROPIC_API_KEY`), `AGENT_API_KEY`, `TEAMS_ALERT_WEBHOOK_URLS`, `TEAMS_REPLY_WEBHOOK_URL` and `TEAMS_OUTGOING_WEBHOOK_SECRET` (all optional).
 4. **Edit [`deploy/deployment.yaml`](../deploy/deployment.yaml):** the image and `CLUSTER_NAME` (optionally `ALLOWED_NAMESPACES`). Then `kubectl apply -f deploy/deployment.yaml`.
 5. **Activity notices:** `bash deploy/webhook-cert.sh`.
 6. **Questions from Teams:** edit and apply [`deploy/ingress.yaml`](../deploy/ingress.yaml), which exposes only `/teams/webhook`, and point DNS at it.
@@ -255,7 +266,7 @@ Mention the agent in the channel that has the outgoing webhook:
 | `@kubesupport activity` | The latest cluster activity: exec into pods, created/deleted objects, security changes, updates |
 | `@kubesupport rca payments/api-7d9f8b-x` | A full RCA card for that pod (posted to the channel) |
 | `@kubesupport rca checkout is returning 500s` | An investigation of a problem you describe |
-| `@kubesupport <any question>` | Claude's answer, using the live cluster (posted to the channel) |
+| `@kubesupport <any question>` | The AI model's answer, using the live cluster (posted to the channel) |
 
 - Questions in the same thread share a conversation, so you can ask follow-ups.
 - Alert cards end with the exact `rca` command for the failing pod.
@@ -265,10 +276,10 @@ Mention the agent in the channel that has the outgoing webhook:
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz`, `/ready` | Probes |
-| `GET /alerts/status` | Watcher state, open incidents, Claude budget, Teams setup |
+| `GET /alerts/status` | Watcher state, open incidents, AI-model budget, AI provider and model, Teams setup |
 | `POST /alerts/test` | Send a sample card to the alert webhooks |
 | `POST /rca` `{"question", "namespace", "pod", "post_to_teams"}` | Run an RCA; optionally post it to Teams |
-| `POST /chat` `{"message", "session_id"}` | Ask a question (Claude) |
+| `POST /chat` `{"message", "session_id"}` | Ask a question (AI model) |
 | `GET /rca/latest` | HTML of the last RCA this pod produced |
 | `GET /activity?limit=50` | Recent cluster activity (who did what) |
 | `GET /activity/status` | Activity webhook: certificate present, calls received, last call, events, targets |
@@ -282,20 +293,29 @@ Plain settings live in the ConfigMap `kubesupport-config` in [`deploy/deployment
 
 | Setting | Where | Default | Meaning |
 |---|---|---|---|
-| `ANTHROPIC_API_KEY` | Secret | — | Claude. Without it the agent uses rules only and can't answer free-form questions. |
+| `GROQ_API_KEY` | Secret | — | Groq AI model. Without an AI key the agent uses rules only and can't answer free-form questions. |
+| `ANTHROPIC_API_KEY` | Secret | — | Claude, instead of Groq (wins when both are set and `LLM_PROVIDER` is `auto`) |
+| `LLM_API_KEY` | Secret | — | Key for another OpenAI-compatible service (with `LLM_BASE_URL`) |
 | `AGENT_API_KEY` | Secret | — | Required `x-api-key` for the internal API |
 | `TEAMS_ALERT_WEBHOOK_URLS` | Secret | — | Workflows webhook URL(s) for alerts: chats, standard or private channels. Comma-separated; each optionally `name=URL` |
 | `TEAMS_REPLY_WEBHOOK_URL` | Secret | first alert URL | Workflows webhook of the questions channel (answers that take longer than 5 s) |
 | `TEAMS_OUTGOING_WEBHOOK_SECRET` | Secret | — | The outgoing webhook's security token; without it `/teams/webhook` is off |
 | `CLUSTER_NAME` | ConfigMap | `""` | Prefix on every alert, e.g. `[prod-eks]` |
 | `ALLOWED_NAMESPACES` | ConfigMap | `*` | Namespaces for incident alerts and Teams answers; `*` = all. Read permissions are cluster-wide either way. |
-| `AGENT_MODEL` / `AGENT_EFFORT` / `AGENT_FALLBACKS` | ConfigMap | `claude-opus-5-5` / `high` / `default` | Claude model, effort, refusal fallback |
+| `LLM_PROVIDER` | ConfigMap | `auto` | `auto`, `groq`, `anthropic`, `openai` (any OpenAI-compatible service) or `none` (rules only) |
+| `AGENT_MODEL` | ConfigMap | `""` = provider default | Groq `openai/gpt-oss-120b`; Claude `claude-opus-5-5` |
+| `AGENT_EFFORT` | ConfigMap | `""` = provider default | `low` / `medium` / `high` (Claude also `xhigh` / `max`); Groq `medium`, Claude `high`; `none` = not sent. On Groq it applies to `openai/gpt-oss*` models only. |
+| `LLM_MAX_STEPS` | ConfigMap | Groq `8`, Claude `14` | Model calls per answer or RCA |
+| `LLM_TOOL_OUTPUT_CHARS` | ConfigMap | Groq `2500`, Claude `15000` | Characters of one tool result given to the model |
+| `LLM_MAX_REQUEST_CHARS` / `LLM_MAX_OUTPUT_TOKENS` | ConfigMap | Groq `14000` / `2500` | Size of one request and reply (Groq and OpenAI-compatible only); raise on a paid Groq plan |
+| `LLM_BASE_URL` | ConfigMap | `""` | Endpoint for `LLM_PROVIDER` `openai`, e.g. `https://api.openai.com/v1` |
+| `AGENT_FALLBACKS` | ConfigMap | `default` | Claude only: server-side refusal fallback; `off` to disable |
 | `WATCH_ENABLED` | ConfigMap | `true` | Turn the watcher (alerts) off/on |
 | `WATCH_INTERVAL_SECONDS` | ConfigMap | `60` | Scan period |
 | `ALERT_COOLDOWN_MINUTES` | ConfigMap | `60` | Reminder interval for a still-open incident |
 | `RESOLVE_AFTER_MINUTES` | ConfigMap | `10` | How long an incident must be gone before "Resolved" |
 | `PENDING_GRACE_MINUTES` | ConfigMap | `5` | Pending longer than this = incident |
-| `MAX_LLM_RCA_PER_HOUR` | ConfigMap | `10` | Claude RCAs per hour for alerts |
+| `MAX_LLM_RCA_PER_HOUR` | ConfigMap | `10` | AI-model RCAs per hour for alerts; then rule-based (Groq free plan: try `3`) |
 | `ACTIVITY_ENABLED` | ConfigMap | `true` | Activity notices on/off (they also need `webhook-cert.sh`) |
 | `ACTIVITY_BATCH_SECONDS` | ConfigMap | `60` | One activity card per this many seconds |
 | `ACTIVITY_IGNORE_USERS` | ConfigMap | Kubernetes/EKS components + kubesupport | Comma-separated caller prefixes whose actions aren't reported |
@@ -331,7 +351,8 @@ The image, permissions and resources are set directly in [`deploy/deployment.yam
 | "Looking into it" but no answer appears | `TEAMS_REPLY_WEBHOOK_URL` points to another channel, or that workflow is broken (agent log: "Teams webhook … returned …") |
 | "namespace … not allowed" | Add the namespace to `ALLOWED_NAMESPACES` |
 | Too many alerts | Narrow `ALLOWED_NAMESPACES`, raise `ALERT_COOLDOWN_MINUTES` |
-| RCAs are rule-based although a key is set | `llm_error` in `/rca` responses, or the agent log ("LLM investigation failed"). Typical causes: wrong key; a model that doesn't accept the effort or fallback settings (try `AGENT_FALLBACKS=off`); `MAX_LLM_RCA_PER_HOUR` reached. |
+| RCAs are rule-based although a key is set | `llm_error` in `/rca` responses, or the agent log ("LLM investigation failed"). Typical causes: wrong key; Groq's daily token limit used up (`llm_error` says `rate limit, retry after …`); a model that doesn't accept the effort or fallback settings (try `AGENT_EFFORT=none` or `AGENT_FALLBACKS=off`); `MAX_LLM_RCA_PER_HOUR` reached. |
+| AI answers take minutes | Normal on Groq's free plan: kubesupport waits out the per-minute token limit (log: `Model API returned 429; retrying in …`). A paid plan is faster; raise `LLM_MAX_REQUEST_CHARS` and `LLM_TOOL_OUTPUT_CHARS` with it. |
 | Agent pod not Ready | `kubectl -n kubesupport describe pod …`. Check the image name and tag, and that the nodes can reach Docker Hub. |
 | No activity cards | `/activity/status`: `webhook_certificate: false` → run `webhook-cert.sh`. `webhook_calls_total: 0` → the EKS control plane can't reach port 8443; allow it from the cluster security group. Calls arriving but no card → the actions came from ignored callers, or the alert targets are failing (`/alerts/test`). |
 | Activity cards too noisy | Add the busy caller's prefix to `ACTIVITY_IGNORE_USERS` (e.g. `system:serviceaccount:argocd:`) |
@@ -347,11 +368,11 @@ cd agent
 python -m venv .venv && source .venv/bin/activate       # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
 export ALLOWED_NAMESPACES=default REPORT_DIR=$PWD/reports
-export ANTHROPIC_API_KEY=...                             # optional
+export GROQ_API_KEY=...                                  # optional (or ANTHROPIC_API_KEY)
 export TEAMS_ALERT_WEBHOOK_URLS='https://...'            # optional: real alerts to Teams
 uvicorn app:app --reload                                 # http://localhost:8000/docs
 python cli.py incidents                                  # what the watcher would alert on
-pytest tests -q                                          # no cluster, Claude or Teams needed
+pytest tests -q                                          # no cluster, AI model or Teams needed
 ```
 
 To try the outgoing webhook locally, expose port 8000 with a tunnel (for example `cloudflared tunnel` or VS Code dev tunnels), and use that HTTPS URL plus `/teams/webhook` as the callback in a test team.
@@ -363,23 +384,25 @@ To try the outgoing webhook locally, expose port 8000 with a tunnel (for example
 | # | Item | Notes |
 |---|---|---|
 | 1 | **Questions only from a standard channel** | Outgoing webhooks don't work in 1:1 chats, group chats or private channels. A private 1:1 chat with the agent would need a registered Teams bot (Azure Bot Service). Alerts and long answers *can* go to your personal chat, group chats and private channels, through their Workflows webhooks. |
-| 2 | **"Bitbucket recent commits" in the system prompt** | The prompt in `agent.py` asks Claude to check recent Bitbucket commits, but the agent has no Bitbucket tool, so Claude can't actually look them up. Adding one means a read-only Bitbucket API token and a new tool in `tools.py`. |
+| 2 | **"Bitbucket recent commits" in the system prompt** | The prompt in `agent.py` asks the model to check recent Bitbucket commits, but the agent has no Bitbucket tool, so it can't actually look them up. Adding one means a read-only Bitbucket API token and a new tool in `tools.py`. |
 | 3 | **State is in memory** | Open incidents and chat history are lost when the pod restarts. The startup summary card covers the gap. Keep `replicas: 1`, as in `deployment.yaml`. |
 | 4 | **Teams limits** | Outgoing-webhook replies must come within 5 s, so long answers arrive as separate channel posts rather than in the thread. Workflows have Power Automate request limits, so an alert storm across many workloads can be throttled. |
-| 5 | **Rule-based RCAs are generic** | They recognise the common failure types listed in 4.2. For real root causes, set an Anthropic key. |
-| 6 | **`scan_cluster_for_issues` uses the old rule** | This tool (used by `cli.py scan` and offered to Claude) still flags any pod that *ever* restarted. The watcher and `status` use the new `detect_incidents`. |
+| 5 | **Rule-based RCAs are generic** | They recognise the common failure types listed in 4.2. For real root causes, set a Groq or Anthropic key. |
+| 6 | **`scan_cluster_for_issues` uses the old rule** | This tool (used by `cli.py scan` and offered to the AI model) still flags any pod that *ever* restarted. The watcher and `status` use the new `detect_incidents`. |
 | 7 | **`/rca/latest`** | Shows only the last RCA produced by the current pod, and only internally. |
 | 8 | **Exec shows the starting command only** | For `kubectl exec -it pod -- sh`, Kubernetes reports `sh`, not what is typed inside the shell. Recording keystrokes needs a runtime security tool (e.g. Falco) or EKS audit logs. |
 | 9 | **Activity while kubesupport is down** | Isn't reported, because the webhook is skipped (by design, so nothing is blocked). Recent activity is held in memory and lost on restart. |
 | 10 | **Secret objects reach the webhook** | The API server sends the whole object; kubesupport keeps only the name. Remove `secrets` from the webhook rules if that's not acceptable. |
+| 11 | **Groq free plan** | Per-minute and per-day token limits make AI answers and RCAs slow (minutes), and they stop for the day once the daily limit is used up; alerts then carry rule-based RCAs. Requests are kept small, so the model sees shortened tool output. |
+| 12 | **Open models are less predictable** | Groq's models sometimes skip a tool or return an incomplete RCA. kubesupport reminds the model to call `submit_rca`, then requires it, checks the result, and falls back to the rules if it is still unusable. Claude gives the most thorough RCAs. |
 
 ---
 
 ## 11. Cost
 
-- **Anthropic API:**
-  - billed per token, only when a key is set;
-  - an RCA can take up to 14 model calls; `claude-opus-5-5` costs $4 / $20 per million input/output tokens (at the time of writing);
+- **AI model:**
+  - **Groq:** the free plan costs nothing, with token limits per minute and per day; paid plans bill per token (https://groq.com/pricing);
+  - **Anthropic:** billed per token, only when a key is set. An RCA can take up to 14 model calls; `claude-opus-5-5` costs $4 / $20 per million input/output tokens (at the time of writing);
   - alerts are capped by `MAX_LLM_RCA_PER_HOUR`; questions from Teams are not capped;
   - lower `AGENT_EFFORT` or pick a cheaper `AGENT_MODEL` to spend less.
 - **Infrastructure:** nothing extra. The image is on Docker Hub (free for public repositories), and the agent runs on your existing nodes (50m CPU / 128Mi requested).
@@ -400,4 +423,6 @@ To try the outgoing webhook locally, expose port 8000 with a tunnel (for example
 | **CrashLoopBackOff** | A container keeps crashing, and Kubernetes waits longer before each restart |
 | **OOMKilled (exit 137)** | The container used more memory than its limit and the kernel killed it |
 | **ImagePullBackOff** | Kubernetes can't pull the image (wrong tag, no access, registry down) |
-| **Effort** | How much Claude thinks before answering; lower is faster and cheaper |
+| **Effort** | How much the AI model thinks (reasons) before answering; lower is faster and cheaper |
+| **Groq** | A hosted AI service that runs open models, such as `openai/gpt-oss-120b`, behind an OpenAI-compatible API. kubesupport uses it when `GROQ_API_KEY` is set. |
+| **Token** | The unit AI services count text in, roughly 3–4 characters; rate limits and prices are per token |

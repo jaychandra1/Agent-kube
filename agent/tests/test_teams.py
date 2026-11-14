@@ -91,8 +91,8 @@ def test_retried_message_is_answered_once():
     assert "status" in first["text"] and second["text"] == "(already answered)"
 
 
-def test_question_without_claude():
-    assert "isn't configured" in teams.handle_outgoing(activity("<at>kubesupport</at> why is web down?"))["text"]
+def test_question_without_an_ai_model():
+    assert "No AI model is configured" in teams.handle_outgoing(activity("<at>kubesupport</at> why is web down?"))["text"]
 
 
 def test_question_is_answered_later_through_reply_webhook(monkeypatch, posted):

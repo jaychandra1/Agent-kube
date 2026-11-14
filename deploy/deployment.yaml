@@ -120,15 +120,21 @@ metadata:
 data:
   CLUSTER_NAME: ""                 # EDIT: shown on every Teams message, e.g. "prod-eks"
   ALLOWED_NAMESPACES: "*"          # namespaces for incident alerts and Teams answers; "*" = all (permissions are cluster-wide either way)
-  AGENT_MODEL: "claude-opus-5-5"   # Claude model (used only when ANTHROPIC_API_KEY is set)
-  AGENT_EFFORT: "high"             # low | medium | high | xhigh | max (lower = cheaper, faster)
-  AGENT_FALLBACKS: "default"       # refusal fallback; "off" to disable
+  LLM_PROVIDER: "auto"             # AI model: auto (uses whichever key is in the Secret) | groq | anthropic | openai | none
+  AGENT_MODEL: ""                  # "" = provider default (Groq: openai/gpt-oss-120b; Claude: claude-opus-5-5)
+  AGENT_EFFORT: ""                 # "" = provider default; low | medium | high ("none" = don't send)
+  LLM_MAX_STEPS: ""                # "" = provider default (Groq: 8 model calls per answer or RCA; Claude: 14)
+  LLM_TOOL_OUTPUT_CHARS: ""        # "" = provider default (Groq: 2500 characters per tool result; Claude: 15000)
+  LLM_MAX_REQUEST_CHARS: ""        # "" = provider default (Groq: 14000 characters per request); raise on a paid Groq plan
+  LLM_MAX_OUTPUT_TOKENS: ""        # "" = provider default (Groq: 2500 tokens per reply)
+  LLM_BASE_URL: ""                 # only for LLM_PROVIDER "openai" (any OpenAI-compatible endpoint)
+  AGENT_FALLBACKS: "default"       # Claude only: refusal fallback; "off" to disable
   WATCH_ENABLED: "true"            # "false" = no incident alerts (questions still work)
   WATCH_INTERVAL_SECONDS: "60"     # how often the cluster is checked for failing pods
   ALERT_COOLDOWN_MINUTES: "60"     # reminder for a still-open incident at most this often
   RESOLVE_AFTER_MINUTES: "10"      # incident must be gone this long before "Resolved" is sent
   PENDING_GRACE_MINUTES: "5"       # a pod Pending longer than this is an incident
-  MAX_LLM_RCA_PER_HOUR: "10"       # Claude RCAs per hour for alerts; then rule-based RCAs
+  MAX_LLM_RCA_PER_HOUR: "10"       # AI-model RCAs per hour for alerts; then rule-based RCAs (Groq free plan: keep it low)
   ACTIVITY_ENABLED: "true"         # activity notices (needs deploy/webhook-cert.sh); "false" to switch off
   ACTIVITY_BATCH_SECONDS: "60"     # activity is grouped into one Teams card per this many seconds
   ACTIVITY_IGNORE_USERS: "system:node:,system:kube-,system:apiserver,system:serviceaccount:kube-system:,eks:,system:serviceaccount:kubesupport:"  # callers whose actions are not reported (prefixes)
@@ -177,7 +183,7 @@ spec:
             - configMapRef:
                 name: kubesupport-config
             - secretRef:
-                name: kubesupport-secrets   # ANTHROPIC_API_KEY, AGENT_API_KEY, TEAMS_* (Configuration.md, step 5)
+                name: kubesupport-secrets   # GROQ_API_KEY (or ANTHROPIC_API_KEY), AGENT_API_KEY, TEAMS_* (Configuration.md, step 5)
                 optional: true
           securityContext:
             allowPrivilegeEscalation: false

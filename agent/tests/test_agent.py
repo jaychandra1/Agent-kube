@@ -22,7 +22,7 @@ def scripted(monkeypatch, responses):
     """Replace the API call with scripted responses; return the list of message histories sent."""
     sent = []
 
-    def fake_create(messages, tools):
+    def fake_create(messages, tools, **kw):
         sent.append([dict(m) for m in messages])
         return responses.pop(0)
     monkeypatch.setattr(agent, "_create", fake_create)
@@ -35,7 +35,7 @@ def test_llm_rca_returns_submitted_rca(monkeypatch):
 
 
 def test_llm_rca_runs_tools_then_submits(monkeypatch):
-    monkeypatch.setattr(agent, "call_tool", lambda name, args: f"<untrusted_data>{name}</untrusted_data>")
+    monkeypatch.setattr(agent, "call_tool", lambda name, args, *a: f"<untrusted_data>{name}</untrusted_data>")
     sent = scripted(monkeypatch, [
         resp("tool_use", [tool_use("list_pods", {"namespace": "default"}, id="a")]),
         resp("tool_use", [tool_use("submit_rca", SAMPLE_RCA, id="b")]),
@@ -62,9 +62,9 @@ def test_refusal_falls_back_to_rules(monkeypatch):
     assert rca["generated_by"] == "heuristic" and "refusal" in rca["llm_error"]
 
 
-def test_use_llm_false_skips_claude(monkeypatch):
+def test_use_llm_false_skips_the_model(monkeypatch):
     monkeypatch.setattr(agent, "client", object())
-    monkeypatch.setattr(agent, "_create", lambda *a: pytest.fail("Claude must not be called"))
+    monkeypatch.setattr(agent, "_create", lambda *a, **k: pytest.fail("the model must not be called"))
     seen = {}
 
     def heuristic(**kw):

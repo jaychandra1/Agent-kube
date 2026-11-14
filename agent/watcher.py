@@ -3,7 +3,7 @@
 Every WATCH_INTERVAL_SECONDS it calls tools.detect_incidents and compares the result
 with the incidents it already knows about:
 
-* new incident      -> RCA (Claude while under MAX_LLM_RCA_PER_HOUR, else rules) -> alert card
+* new incident      -> RCA (AI model while under MAX_LLM_RCA_PER_HOUR, else rules) -> alert card
 * still open        -> a short reminder every ALERT_COOLDOWN_MINUTES
 * gone for RESOLVE_AFTER_MINUTES -> "Resolved" card (the delay stops a crash-looping
   pod, which looks healthy between restarts, from flapping between open and resolved)
@@ -67,7 +67,7 @@ class Watcher:
             max_llm_per_hour=_env_float("MAX_LLM_RCA_PER_HOUR", 10),
         )
 
-    # ─── RCA with an hourly Claude budget ───────────────────────────────────
+    # ─── RCA with an hourly AI-model budget ─────────────────────────────────
     def _llm_budget_left(self, now: float) -> bool:
         while self._llm_calls and now - self._llm_calls[0] > 3600:
             self._llm_calls.popleft()

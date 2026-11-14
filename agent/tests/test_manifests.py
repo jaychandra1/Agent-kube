@@ -28,7 +28,7 @@ def settings_read_by_code() -> set:
 
 DOCS = load("deployment.yaml")
 WEBHOOK_DOCS = load("activity-webhook.yaml")
-SECRET_KEYS = {"ANTHROPIC_API_KEY", "AGENT_API_KEY", "TEAMS_ALERT_WEBHOOK_URLS",
+SECRET_KEYS = {"GROQ_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY", "AGENT_API_KEY", "TEAMS_ALERT_WEBHOOK_URLS",
                "TEAMS_REPLY_WEBHOOK_URL", "TEAMS_OUTGOING_WEBHOOK_SECRET"}
 
 

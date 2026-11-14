@@ -81,7 +81,7 @@ def test_resolved_only_after_grace_and_no_flapping():
     assert w.current_incidents() is None or w.open == {}
 
 
-def test_hourly_claude_budget(monkeypatch):
+def test_hourly_model_budget(monkeypatch):
     monkeypatch.setattr(agent, "client", object())  # pretend Claude is configured
     w, state, _, rca_calls, clock = make_watcher(max_llm_per_hour=1)
     w.tick()

@@ -9,7 +9,8 @@ The Python app that runs in the cluster. Full documentation: [docs/IMPLEMENTATIO
 | `activity.py` | Activity webhook: turns API-server admission requests into "who did what" events; one Teams card per minute |
 | `watcher.py` | Every minute: find incidents, run an RCA for new ones, post Teams alerts, post "resolved" notices |
 | `tools.py` | Read-only Kubernetes tools, including any kind of object (`list_resources`, `get_resource`); namespace allowlist, redaction, `detect_incidents()` |
-| `agent.py` | Claude tool-use loop that ends in a structured RCA, plus the rule-based fallback |
+| `agent.py` | AI tool-use loop that ends in a structured RCA; picks the provider (Groq, Claude, OpenAI-compatible); rule-based fallback |
+| `llm_openai.py` | Groq / OpenAI-compatible client: converts the conversation, keeps requests within rate limits, retries |
 | `teams.py` | Teams: HMAC check, commands, 5-second reply rule, posting cards to Workflows webhooks |
 | `cards.py` | Adaptive Cards for alerts, resolved notices, RCAs, answers and cluster activity |
 | `report.py`, `templates/` | HTML version of an RCA (internal `/rca/latest`) |
@@ -23,7 +24,7 @@ Uses your current kubeconfig. Teams settings are optional; without them the agen
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
 export ALLOWED_NAMESPACES=default                       # namespaces to read and watch
-export ANTHROPIC_API_KEY=...                            # optional: Claude answers and RCAs
+export GROQ_API_KEY=...                                 # optional: AI answers and RCAs (or ANTHROPIC_API_KEY)
 export TEAMS_ALERT_WEBHOOK_URLS=https://...             # optional: Workflows webhook for alerts
 export REPORT_DIR=$PWD/reports
 uvicorn app:app --reload                                # http://localhost:8000/docs
@@ -38,6 +39,6 @@ python cli.py teams-test                                # sample card to your Te
 ## Tests
 
 ```bash
-pytest tests -q            # no cluster, Claude or Teams needed
+pytest tests -q            # no cluster, AI model or Teams needed
 flake8 . --select=F,E9
 ```

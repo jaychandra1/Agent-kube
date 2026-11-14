@@ -6,7 +6,7 @@
 * Questions come IN through a Teams *outgoing webhook*: a team owner creates it in
   Teams (Manage team -> Apps -> Create an outgoing webhook). When someone @mentions
   it in a channel, Teams POSTs the message here, signed with HMAC-SHA256, and shows
-  whatever we return within 5 seconds as the reply. Slow work (Claude, RCA) is
+  whatever we return within 5 seconds as the reply. Slow work (AI answers, RCA) is
   acknowledged at once and the result is posted to the channel's Workflows webhook.
 """
 import base64
@@ -65,7 +65,7 @@ POST_ATTEMPTS = 3                # Workflows throttles >4 requests/s (HTTP 429);
 _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="teams")
 _seen_ids = deque(maxlen=500)    # Teams can resend the same message; answer once
 _seen_lock = threading.Lock()
-_sessions: dict[str, list] = {}  # Claude chat history per channel thread
+_sessions: dict[str, list] = {}  # AI chat history per channel thread
 _session_locks: dict[str, threading.Lock] = {}
 _sessions_lock = threading.Lock()
 
@@ -165,7 +165,7 @@ HELP = """**kubesupport** - mention me with one of these:
 - `rca <question>` - investigate a problem you describe
 - anything else - ask a question about the cluster in plain words
 
-Long answers (Claude, RCA) arrive as a separate message in this channel."""
+Long answers (AI answers, RCA) arrive as a separate message in this channel."""
 
 
 def _code(text: str) -> str:
@@ -350,9 +350,10 @@ def handle_outgoing(activity: dict) -> dict:
             logger.exception("Teams quick command failed")
             return _reply(f"Sorry, that failed: {type(e).__name__}: {e}")
 
-    # Slow work: Claude questions and RCAs
+    # Slow work: AI questions and RCAs
     if cmd == "ask" and not agent.client:
-        return _reply("Claude isn't configured for this agent, so I can only run commands.\n\n" + HELP)
+        return _reply("No AI model is configured for this agent (GROQ_API_KEY or ANTHROPIC_API_KEY), "
+                      "so I can only run commands.\n\n" + HELP)
     if not REPLY_TARGET:
         return _reply("I need a Teams reply webhook (TEAMS_REPLY_WEBHOOK_URL) to send answers that take "
                       "longer than a few seconds. Commands like `status` and `pods <namespace>` still work.")

@@ -141,7 +141,7 @@ def test_main_starts_webhook_only_with_a_certificate(monkeypatch, tmp_path):
     assert main.build_configs()[1] is None
 
 
-def test_tools_offered_to_claude_include_generic_reads():
+def test_tools_offered_to_the_model_include_generic_reads():
     names = {t["name"] for t in tools.TOOL_SCHEMAS}
     assert {"list_resources", "get_resource"} <= names
     assert json.dumps(tools.TOOL_SCHEMAS)  # serialisable for the API

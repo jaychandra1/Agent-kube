@@ -1,5 +1,8 @@
 """LLM agent loop: investigate with tools, then emit a structured RCA.
-Includes an intelligent heuristic fallback if Anthropic API key is not configured."""
+
+The model can be Claude (ANTHROPIC_API_KEY), Groq (GROQ_API_KEY), or any other
+OpenAI-compatible endpoint (LLM_BASE_URL + LLM_API_KEY). Without any of them, a
+rule-based analyzer produces the RCA."""
 import os
 import json
 import logging
@@ -13,28 +16,81 @@ from tools import (
 
 logger = logging.getLogger("kubesupport.agent")
 
-MODEL = os.getenv("AGENT_MODEL", "claude-opus-5-5")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
-# Thinking depth and token spend: low | medium | high | xhigh | max.
-# Set to "" for older models that don't accept the effort setting.
-EFFORT = os.getenv("AGENT_EFFORT", "high").strip()
-# Server-side refusal fallback: with "default", a request the model declines is
-# re-run on Anthropic's recommended fallback model inside the same API call.
-# Set to "off" for models or platforms that don't support it.
+GROQ_KEY = os.getenv("GROQ_API_KEY", "").strip()
+LLM_KEY = os.getenv("LLM_API_KEY", "").strip()
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip()
+
+
+def select_provider(setting: str, anthropic_key: str, groq_key: str, llm_key: str, base_url: str) -> str:
+    """'anthropic', 'groq', 'openai' (any OpenAI-compatible endpoint) or '' (rules only).
+    With LLM_PROVIDER=auto (default) the first available key wins, in that order."""
+    setting = (setting or "auto").strip().lower()
+    if setting != "auto":
+        return "" if setting in ("none", "off", "rules") else setting
+    if anthropic_key:
+        return "anthropic"
+    if groq_key:
+        return "groq"
+    if base_url:
+        return "openai"
+    return ""
+
+
+PROVIDER = select_provider(os.getenv("LLM_PROVIDER", "auto"), ANTHROPIC_KEY, GROQ_KEY, LLM_KEY, LLM_BASE_URL)
+# Per-provider defaults; every value can be overridden in the ConfigMap. Groq's free plan
+# allows about 8K tokens per minute and rejects a bigger request, so one Groq request
+# (messages + tool definitions, ~14K characters, plus 2.5K output tokens) stays below it.
+PROVIDER_DEFAULTS = {
+    "anthropic": {"model": "claude-opus-5-5", "effort": "high", "steps": 14, "tool_chars": 15000},
+    "groq": {"model": "openai/gpt-oss-120b", "effort": "medium", "steps": 8, "tool_chars": 2500,
+             "request_chars": 14000, "output_tokens": 2500},
+    "openai": {"model": "", "effort": "", "steps": 12, "tool_chars": 8000, "request_chars": 60000,
+               "output_tokens": 4000},
+}
+_defaults = PROVIDER_DEFAULTS.get(PROVIDER, {"model": "", "effort": "", "steps": 12, "tool_chars": 15000})
+MODEL = os.getenv("AGENT_MODEL", "").strip() or _defaults["model"]
+# Thinking depth: low | medium | high (Claude also xhigh | max). "none" = don't send it.
+EFFORT = os.getenv("AGENT_EFFORT", "").strip().lower() or _defaults["effort"]
+if EFFORT in ("none", "off"):
+    EFFORT = ""
+RCA_STEPS = int(os.getenv("LLM_MAX_STEPS", "") or _defaults["steps"])  # model calls per investigation
+TOOL_OUTPUT_CHARS = int(os.getenv("LLM_TOOL_OUTPUT_CHARS", "") or _defaults["tool_chars"])
+MAX_REQUEST_CHARS = int(os.getenv("LLM_MAX_REQUEST_CHARS", "") or _defaults.get("request_chars", 60000))
+MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "") or _defaults.get("output_tokens", 4000))
+# Claude only: server-side refusal fallback ("default" = Anthropic's recommended model; "off" to disable).
 FALLBACKS = os.getenv("AGENT_FALLBACKS", "default").strip()
 USE_FALLBACKS = FALLBACKS.lower() not in ("", "off", "none", "false", "0")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_TOKENS = 16000
-RCA_STEPS = 14  # model calls allowed per RCA investigation
 
 client = None
-if ANTHROPIC_KEY:
+if PROVIDER == "anthropic" and ANTHROPIC_KEY:
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        logger.info("Initialized Anthropic client with model %s", MODEL)
+        logger.info("AI model: Claude (%s)", MODEL)
     except Exception as e:
         logger.warning("Could not initialize Anthropic client: %s", e)
+elif PROVIDER in ("groq", "openai"):
+    from llm_openai import GROQ_BASE_URL, OpenAICompatibleClient
+    _key = GROQ_KEY if PROVIDER == "groq" else LLM_KEY
+    _base = LLM_BASE_URL or (GROQ_BASE_URL if PROVIDER == "groq" else "")
+    if not MODEL or not _base or (PROVIDER == "groq" and not _key):
+        logger.warning("AI model not configured: %s needs %s", PROVIDER,
+                       "GROQ_API_KEY" if PROVIDER == "groq" else "LLM_BASE_URL and AGENT_MODEL")
+    else:
+        _reasoning = None
+        if EFFORT and MODEL.startswith("openai/gpt-oss"):  # Groq's reasoning_effort: low | medium | high
+            _reasoning = EFFORT if EFFORT in ("low", "medium", "high") else "high"
+        client = OpenAICompatibleClient(_base, _key, MODEL, reasoning_effort=_reasoning,
+                                        max_completion_tokens=MAX_OUTPUT_TOKENS,
+                                        max_request_chars=MAX_REQUEST_CHARS)
+        logger.info("AI model: %s via %s (%s)", MODEL, PROVIDER, _base)
+elif PROVIDER:
+    logger.warning("Unknown LLM_PROVIDER '%s': running rules-only", PROVIDER)
+else:
+    logger.info("No AI model key set: rules-only mode")
 
 SYSTEM = f"""You are kubesupport, a read-only SRE assistant for a Kubernetes cluster. You may inspect: {watched_namespaces_label()}.
 Rules:
@@ -105,12 +161,17 @@ def _append_user(messages, text):
     else:
         messages.append({"role": "user", "content": text})
 
-def _create(messages, tools):
-    """One Messages API call with the agent's standard settings.
+def _create(messages, tools, require_tool: str | None = None):
+    """One model call with the agent's standard settings; returns an object with
+    .stop_reason and .content blocks for every provider.
 
-    Thinking is left at the model's default (current models think adaptively).
-    Callers send back the full response content, thinking blocks included, and
-    only append to the history; trim_history is the one place that cuts it."""
+    Claude: thinking is left at the model's default (current models think adaptively);
+    callers send back the full response content, thinking blocks included, and only append
+    to the history (trim_history is the one place that cuts it). `require_tool` is ignored,
+    because current Claude models reject a forced tool choice.
+    Groq / OpenAI-compatible: llm_openai converts the history and may force `require_tool`."""
+    if PROVIDER != "anthropic":
+        return client.create(SYSTEM, messages, tools, require_tool=require_tool)
     params = {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
@@ -130,14 +191,14 @@ def _text(resp) -> str:
 def _tool_results(resp) -> list:
     """Run every tool the model asked for; all results go back in one user message."""
     return [
-        {"type": "tool_result", "tool_use_id": b.id, "content": call_tool(b.name, b.input)}
+        {"type": "tool_result", "tool_use_id": b.id, "content": call_tool(b.name, b.input, TOOL_OUTPUT_CHARS)}
         for b in resp.content if b.type == "tool_use"
     ]
 
-def run_loop(messages, max_steps=12) -> str:
+def run_loop(messages, max_steps: int | None = None) -> str:
     if not client:
-        return "Anthropic client is not configured. Running in rule-based mode."
-    for _ in range(max_steps):
+        return "No AI model is configured (GROQ_API_KEY or ANTHROPIC_API_KEY). Running in rule-based mode."
+    for _ in range(max_steps or RCA_STEPS):
         resp = _create(messages, TOOL_SCHEMAS)
         if resp.content:
             messages.append({"role": "assistant", "content": resp.content})
@@ -391,42 +452,73 @@ RCA_INSTRUCTIONS = ("Investigate with the tools, then call the submit_rca tool e
                     "Base it only on evidence from tool output. Do not write the RCA as plain text.")
 RCA_NUDGE = "Call submit_rca now with the final RCA, based only on the evidence gathered above."
 
-def _llm_rca(question: str) -> dict:
-    """Tool-use loop that ends when Claude calls submit_rca.
+SEVERITIES = ("SEV1", "SEV2", "SEV3", "SEV4")
 
-    Current models (such as claude-opus-5-5) reject a forced tool_choice, so the
-    prompt asks for submit_rca, and the loop nudges the model when it stops
-    without calling it or is about to run out of steps."""
+
+def normalize_rca(data) -> dict:
+    """Check and complete a submitted RCA. Claude's strict tool schema already guarantees
+    the shape; other models may leave fields out or use other spellings."""
+    if not isinstance(data, dict):
+        raise ValueError("submit_rca input is not an object")
+    rca = dict(data)
+    for key in ("title", "root_cause"):
+        if not str(rca.get(key) or "").strip():
+            raise ValueError(f"submit_rca without {key}")
+    severity = str(rca.get("severity", "")).upper().replace(" ", "")
+    rca["severity"] = severity if severity in SEVERITIES else "SEV3"
+    confidence = str(rca.get("confidence", "")).lower()
+    rca["confidence"] = confidence if confidence in ("high", "medium", "low") else "low"
+    for key in ("summary", "impact", "stakeholder_summary"):
+        rca[key] = str(rca.get(key) or "")
+    for key in ("affected_services", "contributing_factors", "resolution", "prevention"):
+        value = rca.get(key) or []
+        rca[key] = [str(v) for v in value] if isinstance(value, list) else [str(value)]
+    rca["timeline"] = [t for t in (rca.get("timeline") or []) if isinstance(t, dict)]
+    rca["evidence"] = [e for e in (rca.get("evidence") or []) if isinstance(e, dict)]
+    if not rca["stakeholder_summary"]:
+        rca["stakeholder_summary"] = rca["summary"] or rca["root_cause"]
+    return rca
+
+
+def _llm_rca(question: str) -> dict:
+    """Tool-use loop that ends when the model calls submit_rca.
+
+    Current Claude models reject a forced tool_choice, so the prompt asks for submit_rca
+    and the loop nudges the model when it stops without calling it or is about to run out
+    of steps. After a nudge, OpenAI-compatible providers (Groq) are also told to call it."""
     tools = [*TOOL_SCHEMAS, RCA_TOOL]
     messages = [{"role": "user", "content": f"{question}\n\n{RCA_INSTRUCTIONS}"}]
+    nudged = False
     for step in range(RCA_STEPS):
-        resp = _create(messages, tools)
+        resp = _create(messages, tools, require_tool="submit_rca" if nudged else None)
         if resp.stop_reason not in ("tool_use", "end_turn"):
             raise RuntimeError(f"model stopped with stop_reason={resp.stop_reason}")
         messages.append({"role": "assistant", "content": resp.content})
         for b in resp.content:
             if b.type == "tool_use" and b.name == "submit_rca":
-                return dict(b.input)
+                return normalize_rca(b.input)
         if resp.stop_reason == "tool_use":
             content = _tool_results(resp)
             if step >= RCA_STEPS - 3:
                 content.append({"type": "text", "text": RCA_NUDGE})
+                nudged = True
         else:
             content = RCA_NUDGE
+            nudged = True
         messages.append({"role": "user", "content": content})
     raise RuntimeError(f"no submit_rca call after {RCA_STEPS} model calls")
 
 def investigate_and_rca(question: str, target: dict | None = None, use_llm: bool = True) -> dict:
-    """Run the Claude investigation, or fall back to the heuristic analyzer.
+    """Run the AI-model investigation, or fall back to the heuristic analyzer.
 
     `target` ({"namespace", "pod", "workload", "reason", "detail"}, e.g. a watcher incident)
     points both engines at one pod. `use_llm=False` forces the rules (the watcher's
-    hourly Claude budget). The result says which engine produced it ("generated_by"),
-    and carries the reason in "llm_error" when the Claude path failed."""
+    hourly model budget). The result says which engine produced it ("generated_by"),
+    and carries the reason in "llm_error" when the model path failed."""
     llm_error = None
     if client and use_llm:
         try:
-            logger.info("Starting LLM-driven RCA investigation with model %s", MODEL)
+            logger.info("Starting LLM-driven RCA investigation with %s model %s", PROVIDER, MODEL)
             prompt = question
             if target and target.get("pod"):
                 prompt += (f"\n\nFocus on pod {target['pod']} in namespace {target['namespace']} "
@@ -434,7 +526,7 @@ def investigate_and_rca(question: str, target: dict | None = None, use_llm: bool
                            f"Detector output:\n<untrusted_data>\n{target.get('detail', '')}\n</untrusted_data>")
             rca = _llm_rca(prompt)
             logger.info("LLM successfully submitted structured RCA")
-            rca["generated_by"] = f"llm:{MODEL}"
+            rca["generated_by"] = f"llm:{PROVIDER}:{MODEL}"
             return rca
         except Exception as e:
             llm_error = f"{type(e).__name__}: {e}"

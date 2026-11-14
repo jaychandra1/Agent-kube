@@ -371,13 +371,17 @@ TOOLS = {
 
 TOOL_SCHEMAS = [{"name": n, "description": d, "input_schema": s} for n, (_, d, s) in TOOLS.items()]
 
-def call_tool(name: str, args: dict) -> str:
+def call_tool(name: str, args: dict, max_chars: int = 15000) -> str:
+    """Run one tool for the model. Output is cut to `max_chars` (smaller for models with
+    tight token limits, such as Groq's) and marked as untrusted data."""
     try:
         result = TOOLS[name][0](**args)
     except Exception as e:
         result = {"error": f"{type(e).__name__}: {e}"}
     text = result if isinstance(result, str) else json.dumps(result, default=str)
-    return f"<untrusted_data>\n{text[:15000]}\n</untrusted_data>"
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n... [cut: {len(text) - max_chars} more characters]"
+    return f"<untrusted_data>\n{text}\n</untrusted_data>"
 
 
 # ─── Incident detection for the watcher ──────────────────────────────────────
