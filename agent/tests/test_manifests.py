@@ -92,6 +92,14 @@ def test_deployment():
     assert volumes["webhook-tls"]["secret"] == {"secretName": "kubesupport-webhook-tls", "optional": True}
 
 
+def test_pods_opt_out_of_automatic_instrumentation():
+    """Injected OpenTelemetry init containers break the namespace's 'restricted' Pod Security level."""
+    for dep in by_kind(DOCS + TUNNEL_DOCS, "Deployment"):
+        ann = dep["spec"]["template"]["metadata"]["annotations"]
+        for lang in ("java", "python", "nodejs", "dotnet"):
+            assert ann[f"instrumentation.opentelemetry.io/inject-{lang}"] == "false", (dep["metadata"]["name"], lang)
+
+
 def test_services_target_the_pod():
     services = {s["metadata"]["name"]: s for s in by_kind(DOCS, "Service")}
     (dep,) = by_kind(DOCS, "Deployment")

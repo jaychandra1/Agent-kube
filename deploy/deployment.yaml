@@ -139,8 +139,8 @@ data:
   ACTIVITY_BATCH_SECONDS: "60"     # activity is grouped into one Teams card per this many seconds
   ACTIVITY_IGNORE_USERS: "system:node:,system:kube-,system:apiserver,system:serviceaccount:kube-system:,eks:,system:serviceaccount:kubesupport:"  # callers whose actions are not reported (prefixes)
   ACTIVITY_IGNORE_NAMESPACES: "kube-node-lease"  # namespaces whose activity is not reported
-  TEAMS_TENANT_ID: ""              # recommended: only answer Teams messages from your Microsoft 365 tenant (Step 8.5)
-  TEAMS_ALLOWED_USER_IDS: ""       # recommended: comma-separated Entra object IDs of the people allowed to ask (Step 8.5)
+  TEAMS_TENANT_ID: "5a1f4efd-5119-4558-8d3a-fea50f623c20"              # recommended: only answer Teams messages from your Microsoft 365 tenant (Step 8.5)
+  TEAMS_ALLOWED_USER_IDS: "38a349d8-18b4-430c-9a4f-f358a5307c5d"       # recommended: comma-separated Entra object IDs of the people allowed to ask (Step 8.5)
   REPORT_DIR: "/tmp/reports"
 ---
 apiVersion: apps/v1
@@ -161,6 +161,14 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: kubesupport
+      annotations:
+        # Opt out of automatic OpenTelemetry injection (e.g. the CloudWatch Observability add-on's
+        # Application Signals "auto monitor"). Its injected containers don't meet this namespace's
+        # "restricted" Pod Security level, so the pod would be refused (Configuration.md, Troubleshooting).
+        instrumentation.opentelemetry.io/inject-java: "false"
+        instrumentation.opentelemetry.io/inject-python: "false"
+        instrumentation.opentelemetry.io/inject-nodejs: "false"
+        instrumentation.opentelemetry.io/inject-dotnet: "false"
     spec:
       serviceAccountName: kubesupport
       securityContext:

@@ -30,6 +30,12 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: kubesupport-tunnel
+      annotations:
+        # Opt out of automatic OpenTelemetry injection (see deploy/deployment.yaml)
+        instrumentation.opentelemetry.io/inject-java: "false"
+        instrumentation.opentelemetry.io/inject-python: "false"
+        instrumentation.opentelemetry.io/inject-nodejs: "false"
+        instrumentation.opentelemetry.io/inject-dotnet: "false"
     spec:
       automountServiceAccountToken: false   # cloudflared never talks to the Kubernetes API
       securityContext:
