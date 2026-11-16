@@ -21,25 +21,43 @@ init_k8s_client()
 
 core = client.CoreV1Api()
 apps = client.AppsV1Api()
+batch = client.BatchV1Api()
 custom = client.CustomObjectsApi()
 
 ALLOWED_RAW = os.getenv("ALLOWED_NAMESPACES", "default")
 ALLOWED = {n.strip() for n in ALLOWED_RAW.split(",") if n.strip()}
 RUNBOOK_DIR = os.getenv("RUNBOOK_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "runbooks"))
 
+K8S_TIMEOUT = (5, 30)   # (connect, read) seconds for every Kubernetes API call: a hung call never blocks forever
+
 _KV = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|authorization)(\"?\s*[:=]\s*\"?)([^\s\",;]+)")
+_URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@]+:)[^\s@/]+@")
 _OTHER = [re.compile(r"AKIA[0-9A-Z]{16}"),
           re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")]
+_DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")          # namespaces, containers
+_DNS_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.:]{0,251}[a-z0-9])?$")       # object names (RBAC names may hold ':')
+
 
 def redact(text: str) -> str:
     if not text:
         return ""
     text = _KV.sub(r"\1\2[REDACTED]", text)
+    text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
     for p in _OTHER:
         text = p.sub("[REDACTED]", text)
     return text
 
+
+def _valid(name, what="name") -> str:
+    """Kubernetes object names only: nothing that could change the API path (e.g. '..' or '/')."""
+    if not isinstance(name, str) or not _DNS_NAME.match(name) or ".." in name:
+        raise ValueError(f"invalid {what} '{name}'")
+    return name
+
+
 def _ns(ns: str):
+    if not isinstance(ns, str) or not _DNS_LABEL.match(ns):
+        raise ValueError(f"invalid namespace '{ns}'")
     if "*" not in ALLOWED and ns not in ALLOWED:
         raise ValueError(f"namespace '{ns}' not allowed; allowed: {sorted(ALLOWED)}")
 
@@ -53,7 +71,7 @@ def list_pods(namespace):
     _ns(namespace)
     now = datetime.now(timezone.utc)
     out = []
-    pods = core.list_namespaced_pod(namespace).items
+    pods = core.list_namespaced_pod(namespace, _request_timeout=K8S_TIMEOUT).items
     for p in pods:
         cs = p.status.container_statuses or []
         out.append({
@@ -66,15 +84,13 @@ def list_pods(namespace):
         })
     return out
 
-def describe_pod(namespace, pod):
-    _ns(namespace)
-    p = core.read_namespaced_pod(pod, namespace)
-    spec = {c.name: c for c in p.spec.containers}
-    cons = []
-    for c in p.status.container_statuses or []:
+def _containers(statuses, specs) -> list:
+    spec = {c.name: c for c in specs or []}
+    out = []
+    for c in statuses or []:
         last = c.last_state.terminated if c.last_state else None
         res = spec[c.name].resources if c.name in spec else None
-        cons.append({
+        out.append({
             "name": c.name,
             "image": c.image,
             "ready": c.ready,
@@ -85,20 +101,29 @@ def describe_pod(namespace, pod):
                 "exit_code": last.exit_code,
                 "finished_at": str(last.finished_at)
             } if last else None,
-            "requests": res.requests if res else {},
-            "limits": res.limits if res else {}
+            "requests": (res.requests if res else None) or {},
+            "limits": (res.limits if res else None) or {}
         })
+    return out
+
+
+def describe_pod(namespace, pod):
+    _ns(namespace)
+    p = core.read_namespaced_pod(_valid(pod, "pod"), namespace, _request_timeout=K8S_TIMEOUT)
     return {
         "phase": p.status.phase,
+        "reason": p.status.reason,       # e.g. "Evicted"
+        "message": p.status.message,
         "node": p.spec.node_name,
-        "containers": cons,
-        "conditions": [{"type": c.type, "status": c.status, "reason": c.reason}
+        "init_containers": _containers(p.status.init_container_statuses, p.spec.init_containers),
+        "containers": _containers(p.status.container_statuses, p.spec.containers),
+        "conditions": [{"type": c.type, "status": c.status, "reason": c.reason, "message": c.message}
                        for c in (p.status.conditions or [])]
     }
 
 def get_events(namespace, limit=30):
     _ns(namespace)
-    evs = core.list_namespaced_event(namespace).items
+    evs = core.list_namespaced_event(namespace, _request_timeout=K8S_TIMEOUT).items
     key = lambda e: e.last_timestamp or e.event_time or e.metadata.creation_timestamp or datetime.now(timezone.utc)
     evs.sort(key=key, reverse=True)
     return [{
@@ -114,8 +139,9 @@ def get_pod_logs(namespace, pod, container=None, tail_lines=100, previous=False)
     _ns(namespace)
     try:
         logs = core.read_namespaced_pod_log(
-            pod, namespace, container=container, previous=bool(previous),
-            tail_lines=min(int(tail_lines), 300), timestamps=True
+            _valid(pod, "pod"), namespace, container=_valid(container, "container") if container else None,
+            previous=bool(previous), tail_lines=min(int(tail_lines), 300), timestamps=True,
+            _request_timeout=K8S_TIMEOUT
         )
     except client.ApiException as e:
         return f"log fetch failed: {e.status} {e.reason}"
@@ -123,9 +149,9 @@ def get_pod_logs(namespace, pod, container=None, tail_lines=100, previous=False)
 
 def get_deployment(namespace, name):
     _ns(namespace)
-    d = apps.read_namespaced_deployment(name, namespace)
+    d = apps.read_namespaced_deployment(_valid(name), namespace, _request_timeout=K8S_TIMEOUT)
     sel = ",".join(f"{k}={v}" for k, v in (d.spec.selector.match_labels or {}).items())
-    rs = apps.list_namespaced_replica_set(namespace, label_selector=sel).items
+    rs = apps.list_namespaced_replica_set(namespace, label_selector=sel, _request_timeout=K8S_TIMEOUT).items
     hist = sorted(({
         "revision": r.metadata.annotations.get("deployment.kubernetes.io/revision") if r.metadata.annotations else "unknown",
         "images": [c.image for c in r.spec.template.spec.containers],
@@ -144,7 +170,8 @@ def get_deployment(namespace, name):
 def top_pods(namespace):
     _ns(namespace)
     try:
-        m = custom.list_namespaced_custom_object("metrics.k8s.io", "v1beta1", namespace, "pods")
+        m = custom.list_namespaced_custom_object("metrics.k8s.io", "v1beta1", namespace, "pods",
+                                                 _request_timeout=K8S_TIMEOUT)
     except Exception as e:
         return f"metrics unavailable: {e}"
     return [{
@@ -171,19 +198,27 @@ def watched_namespaces_label() -> str:
     return "all namespaces" if "*" in ALLOWED else ", ".join(sorted(ALLOWED))
 
 
-def pods_by_namespace() -> dict:
-    """Pods in the watched namespaces: every namespace when ALLOWED_NAMESPACES is "*"."""
-    if "*" in ALLOWED:
-        out = {}
-        for p in core.list_pod_for_all_namespaces().items:
-            out.setdefault(p.metadata.namespace, []).append(p)
-        return out
+def pods_by_namespace(unchecked: set | None = None) -> dict:
+    """Pods in the watched namespaces: every namespace when ALLOWED_NAMESPACES is "*".
+    A namespace that can't be read is logged and added to `unchecked` ("pods:<ns>" or "pods:*")."""
     out = {}
+    if "*" in ALLOWED:
+        try:
+            for p in core.list_pod_for_all_namespaces(_request_timeout=K8S_TIMEOUT).items:
+                out.setdefault(p.metadata.namespace, []).append(p)
+        except Exception as e:
+            logger.warning("Could not list pods: %s", e)
+            if unchecked is None:
+                raise
+            unchecked.add("pods:*")
+        return out
     for ns in sorted(ALLOWED):
         try:
-            out[ns] = core.list_namespaced_pod(ns).items
+            out[ns] = core.list_namespaced_pod(ns, _request_timeout=K8S_TIMEOUT).items
         except Exception as e:
             logger.warning("Could not list pods in %s: %s", ns, e)
+            if unchecked is not None:
+                unchecked.add(f"pods:{ns}")
     return out
 
 
@@ -304,13 +339,14 @@ def _summary(kind: str, obj: dict) -> str:
 def list_resources(kind, namespace=None):
     """Objects of any kind (not Secrets), with name, namespace, age and a short status."""
     r = _resolve_kind(kind)
+    page = {"limit": MAX_LIST_ITEMS + 1, "_request_timeout": K8S_TIMEOUT}  # never load a whole big list
     if r.namespaced and namespace:
         _ns(namespace)
-        results = [r.get(namespace=namespace)]
+        results = [r.get(namespace=namespace, **page)]
     elif r.namespaced and "*" not in ALLOWED:
-        results = [r.get(namespace=ns) for ns in sorted(ALLOWED)]
+        results = [r.get(namespace=ns, **page) for ns in sorted(ALLOWED)]
     else:
-        results = [r.get()]
+        results = [r.get(**page)]
     items = [item.to_dict() for res in results for item in (res.items or [])]
     rows = []
     for obj in items[:MAX_LIST_ITEMS]:
@@ -318,10 +354,27 @@ def list_resources(kind, namespace=None):
         rows.append({"name": meta.get("name"), "namespace": meta.get("namespace"),
                      "age_min": _age_minutes(meta.get("creationTimestamp")),
                      "status": redact(_summary(r.kind, obj))})
-    out = {"kind": r.kind, "api_version": getattr(r, "group_version", ""), "count": len(items), "items": rows}
+    out = {"kind": r.kind, "api_version": getattr(r, "group_version", ""), "count": len(rows), "items": rows}
     if len(items) > MAX_LIST_ITEMS:
-        out["note"] = f"showing {MAX_LIST_ITEMS} of {len(items)}; narrow it with a namespace"
+        out["note"] = f"showing the first {MAX_LIST_ITEMS}; there are more. Narrow it with a namespace"
     return out
+
+
+def _hide_env_values(node):
+    """Replace every literal environment-variable value with [REDACTED]: env values often hold
+    passwords and connection strings. Names, valueFrom references and everything else stay."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "env" and isinstance(value, list):
+                for var in value:
+                    if isinstance(var, dict) and var.get("value") not in (None, ""):
+                        var["value"] = "[REDACTED]"
+            else:
+                _hide_env_values(value)
+    elif isinstance(node, list):
+        for item in node:
+            _hide_env_values(item)
+    return node
 
 
 def get_resource(kind, name, namespace=None):
@@ -331,9 +384,10 @@ def get_resource(kind, name, namespace=None):
         if not namespace:
             raise ValueError(f"{r.kind} is namespaced: give a namespace")
         _ns(namespace)
-        obj = r.get(name=name, namespace=namespace).to_dict()
+        obj = r.get(name=_valid(name), namespace=namespace, _request_timeout=K8S_TIMEOUT).to_dict()
     else:
-        obj = r.get(name=name).to_dict()
+        obj = r.get(name=_valid(name), _request_timeout=K8S_TIMEOUT).to_dict()
+    _hide_env_values(obj)
     meta = obj.get("metadata") or {}
     meta.pop("managedFields", None)
     (meta.get("annotations") or {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
@@ -418,28 +472,69 @@ def _age_seconds(ts, now) -> float:
     return (now - ts).total_seconds() if ts else 0.0
 
 
+_RS_HASH = re.compile(r"^(.+)-[a-z0-9]{5,10}$")
+# How long an event-based problem (FailedCreate, eviction) stays an incident after it was last seen
+EVENT_WINDOW_SECONDS = 15 * 60
+
+
+def _owner_workload(kind: str, name: str) -> str:
+    """The workload behind a controller: a ReplicaSet "api-5d8f7c9b6" belongs to Deployment "api"."""
+    if kind == "ReplicaSet":
+        m = _RS_HASH.match(name)
+        return f"Deployment/{m.group(1)}" if m else f"ReplicaSet/{name}"
+    return f"{kind}/{name}"
+
+
+def _event_time(e):
+    return e.last_timestamp or e.event_time or (e.metadata.creation_timestamp if e.metadata else None)
+
+
+def _latest_jobs(jobs: list) -> list:
+    """Standalone Jobs, plus only the newest Job of each CronJob: a CronJob's failure is over
+    once a later run succeeds or is running."""
+    newest, out = {}, []
+    for j in jobs:
+        cron = next((r.name for r in (j.metadata.owner_references or []) if r.kind == "CronJob"), None)
+        if cron is None:
+            out.append((j, None))
+            continue
+        key = (j.metadata.namespace, cron)
+        if key not in newest or (j.metadata.creation_timestamp or 0) > (newest[key].metadata.creation_timestamp or 0):
+            newest[key] = j
+    out += [(j, cron) for (_, cron), j in newest.items()]
+    return out
+
+
 def find_incidents(pods_by_ns: dict, nodes: list, prev_restarts: dict, now: datetime,
-                   recent_seconds: float = 180, pending_grace_minutes: float = 5):
+                   recent_seconds: float = 180, pending_grace_minutes: float = 5,
+                   events: list = (), jobs: list = ()):
     """Pure function behind detect_incidents (easy to unit-test with fake objects).
 
     pods_by_ns: {namespace: [V1Pod]}; nodes: [V1Node]; prev_restarts: {"<pod uid>/<container>": count}
     from the previous scan. A crash counts when the restart count went up since then, or,
     for a container not seen before, when it last terminated within `recent_seconds`.
-    Returns ({incident key: incident}, new restart counts)."""
+    events: FailedCreate events (pods a controller can't create); jobs: Jobs in the watched
+    namespaces. Returns ({incident key: incident}, new restart counts)."""
     incidents = {}
     restarts = {}
 
-    def add(namespace, workload, category, pod_name, detail):
+    def add(namespace, workload, category, pod_name, detail, **extra):
         key = f"{namespace}/{workload}/{category}"
         inc = incidents.setdefault(key, {
             "key": key, "namespace": namespace, "workload": workload, "reason": category,
-            "pod": pod_name, "pods": [], "detail": detail,
+            "pod": pod_name, "pods": [], "detail": detail, **extra,
         })
         if pod_name and pod_name not in inc["pods"]:
             inc["pods"].append(pod_name)
 
     for ns, pods in pods_by_ns.items():
         for p in pods:
+            if p.status.phase == "Failed" and getattr(p.status, "reason", None) == "Evicted":
+                when = max((c.last_transition_time for c in (p.status.conditions or []) if c.last_transition_time),
+                           default=p.status.start_time)
+                if when and _age_seconds(when, now) <= EVENT_WINDOW_SECONDS:
+                    add(ns, _workload_of(p), "Evicted", None, (p.status.message or "evicted")[:300])
+                continue
             if p.status.phase not in ("Pending", "Running"):
                 continue  # Succeeded/Failed pods are finished; not an ongoing incident
             name = p.metadata.name
@@ -486,17 +581,56 @@ def find_incidents(pods_by_ns: dict, nodes: list, prev_restarts: dict, now: date
             add("", f"Node/{n.metadata.name}", "NodeNotReady", None,
                 f"Ready={ready.status} {ready.reason or ''} - {(ready.message or '')[:300]}".strip())
 
+    # Controllers that can't create pods at all (no pod exists, so the pod rules can't see it)
+    for e in events:
+        obj = e.involved_object
+        if not obj or e.reason != "FailedCreate" or obj.kind not in ("ReplicaSet", "StatefulSet", "DaemonSet", "Job"):
+            continue
+        if _age_seconds(_event_time(e), now) > EVENT_WINDOW_SECONDS:
+            continue
+        add(obj.namespace or "", _owner_workload(obj.kind, obj.name), "CannotCreatePods", None,
+            f"{obj.kind}/{obj.name}: {(e.message or '')[:500]}")
+
+    # Failed Jobs (BackoffLimitExceeded, DeadlineExceeded); a CronJob counts by its newest run
+    for j, cron in _latest_jobs(list(jobs)):
+        failed = next((c for c in (j.status.conditions or []) if c.type == "Failed" and c.status == "True"), None)
+        if failed:
+            workload = f"CronJob/{cron}" if cron else f"Job/{j.metadata.name}"
+            add(j.metadata.namespace or "", workload, "JobFailed", None,
+                f"{failed.reason or 'Failed'}: {(failed.message or '')[:300]}", job=j.metadata.name)
+
     return incidents, restarts
 
 
 def detect_incidents(prev_restarts: dict, recent_seconds: float = 180, pending_grace_minutes: float = 5):
-    """Read pods in the allowlisted namespaces (all namespaces with "*") and nodes,
-    and return (incidents, restart counts) via find_incidents."""
-    pods_by_ns = pods_by_namespace()
+    """Read pods in the allowlisted namespaces (all namespaces with "*"), nodes, FailedCreate
+    events and Jobs, and return (incidents, restart counts, unchecked) via find_incidents.
+    `unchecked` names what couldn't be read this time ("pods:<ns>", "pods:*", "nodes", "events",
+    "jobs"), so the watcher doesn't mistake an API error for a resolved incident."""
+    unchecked: set = set()
+    pods_by_ns = pods_by_namespace(unchecked)
     try:
-        nodes = core.list_node().items
+        nodes = core.list_node(_request_timeout=K8S_TIMEOUT).items
     except Exception as e:
         logger.warning("Could not list nodes: %s", e)
         nodes = []
-    return find_incidents(pods_by_ns, nodes, prev_restarts, datetime.now(timezone.utc),
-                          recent_seconds, pending_grace_minutes)
+        unchecked.add("nodes")
+    events = _in_watched(core.list_event_for_all_namespaces, core.list_namespaced_event, "events", unchecked,
+                         field_selector="reason=FailedCreate")
+    jobs = _in_watched(batch.list_job_for_all_namespaces, batch.list_namespaced_job, "jobs", unchecked)
+    incidents, restarts = find_incidents(pods_by_ns, nodes, prev_restarts, datetime.now(timezone.utc),
+                                         recent_seconds, pending_grace_minutes, events=events, jobs=jobs)
+    return incidents, restarts, unchecked
+
+
+def _in_watched(list_all, list_one, label: str, unchecked: set, **kwargs) -> list:
+    """Items from every watched namespace; on failure the label goes into `unchecked`."""
+    kwargs["_request_timeout"] = K8S_TIMEOUT
+    try:
+        if "*" in ALLOWED:
+            return list_all(**kwargs).items
+        return [item for ns in sorted(ALLOWED) for item in list_one(ns, **kwargs).items]
+    except Exception as e:
+        logger.warning("Could not list %s: %s", label, e)
+        unchecked.add(label)
+        return []

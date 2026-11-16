@@ -9,8 +9,8 @@ from tools import find_incidents
 def test_all_namespaces_mode_lists_every_namespace(monkeypatch):
     pods = [make_pod("a", ns="payments", containers=[container(waiting="CrashLoopBackOff")]),
             make_pod("b", ns="kube-system", containers=[container(waiting="ImagePullBackOff")])]
-    fake_core = NS(list_pod_for_all_namespaces=lambda: NS(items=pods),
-                   list_namespaced_pod=lambda ns: (_ for _ in ()).throw(AssertionError("not per-namespace")))
+    fake_core = NS(list_pod_for_all_namespaces=lambda **kw: NS(items=pods),
+                   list_namespaced_pod=lambda ns, **kw: (_ for _ in ()).throw(AssertionError("not per-namespace")))
     monkeypatch.setattr(tools, "core", fake_core)
     monkeypatch.setattr(tools, "ALLOWED", {"*"})
     assert set(tools.pods_by_namespace()) == {"payments", "kube-system"}
@@ -20,7 +20,7 @@ def test_all_namespaces_mode_lists_every_namespace(monkeypatch):
 
 def test_selected_namespaces_mode(monkeypatch):
     calls = []
-    fake_core = NS(list_namespaced_pod=lambda ns: calls.append(ns) or NS(items=[]))
+    fake_core = NS(list_namespaced_pod=lambda ns, **kw: calls.append(ns) or NS(items=[]))
     monkeypatch.setattr(tools, "core", fake_core)
     monkeypatch.setattr(tools, "ALLOWED", {"orders", "payments"})
     assert tools.pods_by_namespace() == {"orders": [], "payments": []}

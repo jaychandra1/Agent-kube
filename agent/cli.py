@@ -3,7 +3,7 @@
 
     python cli.py scan                         # pods that ever restarted or are failing
     python cli.py incidents                    # what the watcher would alert on right now
-    python cli.py rca -q "why is web failing?" # full RCA (AI model if GROQ_API_KEY or ANTHROPIC_API_KEY is set)
+    python cli.py rca -q "why is web failing?" # full RCA (AI model when LLM_PROVIDER is set)
     python cli.py rca -n default -p web-7d9f8b-abcde --teams
     python cli.py teams-test                   # send a sample card to TEAMS_ALERT_WEBHOOK_URLS
 """

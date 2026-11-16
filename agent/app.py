@@ -31,7 +31,8 @@ logger = logging.getLogger("kubesupport.app")
 
 API_KEY = os.getenv("AGENT_API_KEY", "").strip()
 WATCH_ENABLED = os.getenv("WATCH_ENABLED", "true").strip().lower() in ("1", "true", "yes")
-SESSIONS: dict[str, list] = {}
+# Web servers that stopped (set by main.py). A dead Teams server fails /healthz so the pod restarts.
+SERVER_FAILURES: dict[str, str] = {}
 
 
 @asynccontextmanager
@@ -44,19 +45,23 @@ async def lifespan(_app: FastAPI):
         logger.info("Watcher disabled (WATCH_ENABLED=false)")
     if not teams.OUTGOING_SECRET:
         logger.info("TEAMS_OUTGOING_WEBHOOK_SECRET not set: /teams/webhook is disabled")
+    if not API_KEY:
+        logger.warning("AGENT_API_KEY is not set: the internal API (/rca, /chat, /alerts/*, /activity*) is off")
     if activity.ENABLED:
         activity.FEED.start()
     yield
     watcher.WATCHER.stop()
-    activity.FEED.stop()
+    activity.FEED.stop()  # sends what was collected before the pod stops
 
 
 app = FastAPI(title="kubesupport", version="2.0.0", lifespan=lifespan)
 
 
 def auth(key: str | None):
-    # Only enforced when AGENT_API_KEY is configured
-    if API_KEY and (not key or not hmac.compare_digest(key, API_KEY)):
+    """The internal API is closed unless AGENT_API_KEY is set, and then needs that key."""
+    if not API_KEY:
+        raise HTTPException(status_code=403, detail="The internal API is off: set AGENT_API_KEY in the Secret")
+    if not key or not hmac.compare_digest(key, API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing x-api-key header")
 
 
@@ -74,6 +79,16 @@ class RcaIn(BaseModel):
 
 @app.get("/healthz")
 def healthz():
+    """Liveness: fails (503) when the watcher stopped scanning or the Teams server died, so
+    Kubernetes restarts the pod instead of it silently not alerting."""
+    problems = []
+    ok, why = watcher.WATCHER.healthy()
+    if not ok:
+        problems.append(f"watcher: {why}")
+    if "teams" in SERVER_FAILURES:
+        problems.append(f"teams server: {SERVER_FAILURES['teams']}")
+    if problems:
+        return JSONResponse({"status": "failing", "service": "kubesupport", "problems": problems}, status_code=503)
     return {"status": "ok", "service": "kubesupport"}
 
 
@@ -107,11 +122,7 @@ async def teams_webhook(request: Request, authorization: str = Header(None)):
 def chat(body: ChatIn, x_api_key: str = Header(None)):
     auth(x_api_key)
     sid = body.session_id or str(uuid.uuid4())
-    msgs = SESSIONS.setdefault(sid, [])
-    answer = agent.chat(msgs, body.message)
-    if len(msgs) > 40:
-        SESSIONS[sid] = agent.trim_history(msgs, keep=20)
-    return {"session_id": sid, "answer": answer}
+    return {"session_id": sid, "answer": teams.answer_in_session(f"api:{sid}", body.message)}
 
 
 @app.post("/rca")
@@ -129,8 +140,9 @@ def rca(body: RcaIn, x_api_key: str = Header(None)):
 
 
 @app.get("/rca/latest", response_class=HTMLResponse)
-def get_latest_report():
-    """The last RCA rendered by this pod, as HTML. Internal only (not exposed by the Ingress)."""
+def get_latest_report(x_api_key: str = Header(None)):
+    """The last RCA rendered by this pod, as HTML. Internal only."""
+    auth(x_api_key)
     if report.LATEST_HTML:
         return HTMLResponse(content=report.LATEST_HTML, status_code=200)
     return HTMLResponse(content="<p>No RCA has been generated since the agent started.</p>", status_code=404)
@@ -146,8 +158,8 @@ def alerts_status(x_api_key: str = Header(None)):
             "reply_webhook": teams.REPLY_TARGET[0] if teams.REPLY_TARGET else None,
             "outgoing_webhook": bool(teams.OUTGOING_SECRET),
         },
-        "llm": {"configured": bool(agent.client), "provider": agent.PROVIDER or None,
-                "model": agent.MODEL or None},
+        "llm": {"configured": agent.llm is not None, **(agent.llm.describe() if agent.llm else {}),
+                "status": agent.LLM_STATUS},
     }
 
 

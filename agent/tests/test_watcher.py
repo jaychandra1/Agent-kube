@@ -1,5 +1,5 @@
 import agent
-from conftest import SAMPLE_RCA
+from conftest import SAMPLE_RCA, fake_llm
 from watcher import Watcher
 
 INC = {"key": "default/Deployment/web/CrashLoop", "namespace": "default", "workload": "Deployment/web",
@@ -46,7 +46,7 @@ def test_new_incident_gets_alert_with_rca():
     w.tick()  # startup, nothing open
     clock.t, state["found"] = 60, {INC["key"]: INC}
     w.tick()
-    assert rca_calls == [(INC["key"], False)]  # no Claude client in tests
+    assert rca_calls == [(INC["key"], False)]  # no AI model in tests
     assert title(sent[-1]).startswith(SAMPLE_RCA["title"])
 
 
@@ -82,7 +82,7 @@ def test_resolved_only_after_grace_and_no_flapping():
 
 
 def test_hourly_model_budget(monkeypatch):
-    monkeypatch.setattr(agent, "client", object())  # pretend Claude is configured
+    monkeypatch.setattr(agent, "llm", fake_llm())  # pretend an AI model is configured
     w, state, _, rca_calls, clock = make_watcher(max_llm_per_hour=1)
     w.tick()
     clock.t, state["found"] = 60, {INC["key"]: INC, INC2["key"]: INC2}

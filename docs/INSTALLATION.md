@@ -1,14 +1,14 @@
-# Configuration — install kubesupport in EKS and connect it to Teams
+# Installation and configuration: kubesupport in EKS, connected to Teams
 
 **How it's installed:**
 
 - The agent is a **public Docker image** on your Docker Hub account.
-- You install it with **one file**, [`deploy/deployment.yaml`](deploy/deployment.yaml). That file holds the namespace, the **cluster-wide read-only permissions** (every object in every namespace, never Secrets), the settings and the Deployment.
-- **Activity notices** (who exec'd into a pod, created or deleted a service or app, changed permissions, changed an image or scaled) come from an admission webhook. Set it up with one script, [`deploy/webhook-cert.sh`](deploy/webhook-cert.sh) (Step 7b).
-- The optional [`deploy/cloudflare-tunnel.yaml`](deploy/cloudflare-tunnel.yaml) lets you ask questions from a Teams channel through a Cloudflare Tunnel. The cluster opens that connection outward, so nothing in AWS is exposed to the internet.
+- You install it with **one file**, [`deploy/deployment.yaml`](../deploy/deployment.yaml). That file holds the namespace, the **cluster-wide read-only permissions** (every object in every namespace, never Secrets), the settings and the Deployment.
+- **Activity notices** (who exec'd into a pod, created or deleted a service or app, changed permissions, changed an image or scaled) come from an admission webhook. Set it up with one script, [`deploy/webhook-cert.sh`](../deploy/webhook-cert.sh) (Step 7b).
+- The optional [`deploy/cloudflare-tunnel.yaml`](../deploy/cloudflare-tunnel.yaml) lets you ask questions from a Teams channel through a Cloudflare Tunnel. The cluster opens that connection outward, so nothing in AWS is exposed to the internet.
 - Alerts go to a Teams chat and channel that you own.
 
-Follow the steps in order. Each one says **what to do**, **how to check it worked**, and **what to write down**. For how the agent works, see [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md).
+Follow the steps in order. Each one says **what to do**, **how to check it worked**, and **what to write down**. For how kubesupport works, see the [documentation index](../README.md#documentation).
 
 > **Where to run the commands:** everything below is **bash**. On Windows, use **Git Bash** (installed with Git for Windows). Replace every `<…>` placeholder with your value.
 
@@ -25,7 +25,7 @@ Follow the steps in order. Each one says **what to do**, **how to check it worke
 | W5  | Public hostname for questions from Teams               | `kubesupport.example.com`              | [app.appgpc2.xyz](http://app.appgpc2.xyz) |
 | W6  | Your domain in Cloudflare (it holds W5)                | `example.com`                          | appgpc2.xyz                               |
 | W7  | Microsoft 365 tenant ID (Step 8.5)                     | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |                                           |
-| W8  | Groq API key (optional: AI answers and RCAs; Step 5.1) | `gsk_…`                                |                                           |
+| W8  | AI provider and its API key (optional; Step 5.1) | `groq` + `gsk_…` | |
 
 Collected along the way (keep them safe; D1, T1–T3 and C1 work like passwords):
 
@@ -186,7 +186,7 @@ aws eks update-addon --region <W3> --cluster-name <W2> --addon-name vpc-cni \
 
 - **Pod CPU/memory for the AI model** needs **metrics-server**. Check with `kubectl top pods -A`. To add it: `aws eks create-addon --region <W3> --cluster-name <W2> --addon-name metrics-server`, or use its official Helm chart if the add-on isn't offered for your version.
 - **Restricted outbound traffic:**
-  - allow the agent HTTPS (443) to `api.groq.com` (or `api.anthropic.com` if you use Claude) and to your Workflows URL hosts (T1/T2, e.g. `*.powerplatform.com` or `*.logic.azure.com`);
+  - allow the agent HTTPS (443) to your AI provider's API host (e.g. `api.groq.com`; see [docs/AI_PROVIDERS.md](AI_PROVIDERS.md)) and to your Workflows URL hosts (T1/T2, e.g. `*.powerplatform.com` or `*.logic.azure.com`);
   - allow the tunnel pods outbound TCP **and** UDP port **7844** to Cloudflare (`region1.v2.argotunnel.com`, `region2.v2.argotunnel.com`).
 
 ---
@@ -241,25 +241,32 @@ Repeat for as many chats and channels as you like. In Step 5 they all go into `T
 
 ## Step 5 — Namespace and Secret
 
-### 5.1 AI model key (W8, optional)
+### 5.1 AI provider and key (W8, optional)
 
-kubesupport uses an AI model to answer questions in plain words and to write root cause analyses. It works with **Groq** (it has a free plan), with **Claude** (an Anthropic key), or with any other OpenAI-compatible service. Without a key it still sends alerts, answers commands and writes rule-based RCAs.
+kubesupport uses an AI model to answer questions in plain words and to write root cause analyses. One image supports many providers; you pick one with `LLM_PROVIDER` (Step 6.2) and put its key in the Secret as `LLM_API_KEY`. Without a provider it still sends alerts, answers commands and writes rule-based RCAs.
 
-To get a Groq key:
+| Provider | `LLM_PROVIDER` | Where to get the key |
+|---|---|---|
+| Groq (free plan available) | `groq` | console.groq.com → API Keys |
+| Anthropic Claude | `anthropic` | console.anthropic.com → API Keys |
+| Cursor (paid plan) | `cursor` | Cursor Dashboard → API Keys |
+| Google Gemini (free tier available) | `gemini` | aistudio.google.com → Get API key |
+| OpenAI | `openai` | platform.openai.com → API keys (also set `LLM_MODEL`) |
+| Azure OpenAI / Microsoft Foundry | `azure-openai` | Azure portal → your resource → Keys and Endpoint (also `LLM_BASE_URL`, `LLM_MODEL`) |
+| OpenRouter, Mistral, Ollama, any OpenAI-compatible API | `openrouter`, `mistral`, `ollama`, `custom` | see [docs/AI_PROVIDERS.md](AI_PROVIDERS.md) |
 
+📝 **W8** = the provider name and its key. Every provider, its defaults, limits and quirks: [docs/AI_PROVIDERS.md](AI_PROVIDERS.md).
+
+**Example: Groq.**
 1. Sign in at **https://console.groq.com**.
-2. Open **API Keys** → **Create API Key**, name it `kubesupport`, and copy the key. It starts with `gsk_` and is shown only once. That's W8.
+2. Open **API Keys** → **Create API Key**, name it `kubesupport`, and copy the key. It starts with `gsk_` and is shown only once.
 3. Optional check from your laptop. A list of models means the key works:
 
 ```bash
-curl -s https://api.groq.com/openai/v1/models -H "Authorization: Bearer <W8>" | head -c 300
+curl -s https://api.groq.com/openai/v1/models -H "Authorization: Bearer <W8 key>" | head -c 300
 ```
 
-**Groq's free plan is rate-limited:** a small number of tokens per minute and per day (current numbers: https://console.groq.com/docs/rate-limits).
-
-- kubesupport keeps each request small and waits whenever Groq says "too many requests", so an AI answer or RCA can take a few minutes.
-- When the daily limit is used up, alerts carry a rule-based RCA until it resets, and questions get an error message.
-- A paid Groq plan removes most of the waiting.
+**Groq's free plan is rate-limited** (tokens per minute and per day: https://console.groq.com/docs/rate-limits). kubesupport keeps each request small and waits when Groq says "too many requests", so an AI answer or RCA can take a few minutes. When the daily limit is used up, alerts carry a rule-based RCA until it resets.
 
 ### 5.2 Namespace and Secret
 
@@ -269,7 +276,7 @@ Every key is optional; leaving one out turns that feature off. Use **single quot
 kubectl create namespace kubesupport
 
 kubectl -n kubesupport create secret generic kubesupport-secrets \
-  --from-literal=GROQ_API_KEY='<W8>' \
+  --from-literal=LLM_API_KEY='<W8 key>' \
   --from-literal=AGENT_API_KEY="$(openssl rand -hex 16)" \
   --from-literal=TEAMS_ALERT_WEBHOOK_URLS='chat=<T1>,oncall-private=<T4>' \
   --from-literal=TEAMS_REPLY_WEBHOOK_URL='<T2>' \
@@ -278,13 +285,13 @@ kubectl -n kubesupport create secret generic kubesupport-secrets \
 
 | Key | What it's for | If you leave it out |
 |---|---|---|
-| `GROQ_API_KEY` | AI answers and RCAs, with Groq's `openai/gpt-oss-120b` model (5.1) | Rule-based RCAs only; free-form questions are refused |
-| `AGENT_API_KEY` | Protects the internal API (`/alerts/test`, `/rca`, …) | Internal API open to anything in the cluster |
+| `LLM_API_KEY` | The API key of the AI provider chosen with `LLM_PROVIDER` (5.1). The provider's own variable name (e.g. `GROQ_API_KEY`, `CURSOR_API_KEY`) works too. | Rule-based RCAs only; free-form questions are refused |
+| `AGENT_API_KEY` | Protects the internal API (`/alerts/test`, `/rca`, …) and is needed for the checks in Step 9 | Internal API off (answers 403) |
 | `TEAMS_ALERT_WEBHOOK_URLS` | Where alerts go: chats, standard or private channels. Comma-separated; each entry `name=URL` (name optional, shown in logs and test results instead of the secret URL). Leave out `,oncall-private=<T4>` if you skipped 4.4. | No alerts sent |
 | `TEAMS_REPLY_WEBHOOK_URL` | Where slow answers go (questions channel) | Uses the first alert URL |
 | `TEAMS_OUTGOING_WEBHOOK_SECRET` | Verifies questions come from your Teams webhook | `/teams/webhook` switched off |
 
-Using **Claude** instead of Groq? Replace the `GROQ_API_KEY` line with `--from-literal=ANTHROPIC_API_KEY='sk-ant-…'`. If both keys are in the Secret, Claude is used, unless you set `LLM_PROVIDER: "groq"` in 6.2.
+Switching provider later? Put the new key in `LLM_API_KEY` (Step 10, *Change a secret*) and change `LLM_PROVIDER` in the ConfigMap.
 
 ✅ **Check:** `kubectl -n kubesupport describe secret kubesupport-secrets` lists the five keys with their sizes in bytes (the values aren't shown).
 
@@ -311,12 +318,14 @@ With `:latest` and `imagePullPolicy: Always`, a restart picks up the newest imag
 |---|---|
 | `CLUSTER_NAME` | W2. Shown on every alert, so you know which cluster it's about. |
 | `ALLOWED_NAMESPACES` | `"*"` (default) for incident alerts and Teams answers in every namespace, or W4 as a comma-separated list to narrow them. Permissions are cluster-wide either way (6.3). |
+| `LLM_PROVIDER` | The provider from W8, e.g. `"groq"`; `"none"` for rules only. Only this provider is used. |
+| `LLM_MODEL`, `LLM_BASE_URL` | Leave `""` for the provider's defaults. Required for `openai` (model), `azure-openai` (both), `ollama` and `custom` (both). |
+| `TIMEZONE` | Your time zone for RCA times, e.g. `"Asia/Kolkata"` (default UTC). |
 
 The other settings have sensible defaults and a comment each in the file:
 
 - check interval and reminder interval;
-- the AI model: `LLM_PROVIDER` `"auto"` uses whichever key is in the Secret; `AGENT_MODEL` `""` means the provider's default model;
-- the request-size limits for Groq;
+- the AI model's effort, step and size limits (`LLM_*`; `""` = the provider's defaults);
 - the hourly cap on AI RCAs;
 - optional Teams tenant and user restrictions.
 
@@ -395,7 +404,7 @@ bash deploy/webhook-cert.sh
 It does four things:
 
 1. creates a private certificate (valid 10 years) and stores it in Secret `kubesupport-webhook-tls`;
-2. applies [`deploy/activity-webhook.yaml`](deploy/activity-webhook.yaml) with the certificate's CA filled in;
+2. applies [`deploy/activity-webhook.yaml`](../deploy/activity-webhook.yaml) with the certificate's CA filled in;
 3. restarts kubesupport;
 4. waits until it's ready.
 
@@ -589,7 +598,7 @@ curl -s localhost:8080/alerts/status -H "x-api-key: $KEY"
 
 - a **"Test alert from kubesupport"** card arrives in your chat;
 - `/alerts/test` shows `"ok": true` for every target (`chat`, `oncall-private`, …), and the card appears in each chat and channel;
-- `/alerts/status` shows `"running": true` and, if you set W8, `"llm": {"configured": true, "provider": "groq", "model": "openai/gpt-oss-120b"}`.
+- `/alerts/status` shows `"running": true` and, if you set W8, `"llm": {"configured": true, "provider": "groq", "model": "openai/gpt-oss-120b", …}`. If `configured` is `false`, its `status` says what is missing.
 
 ### 9.2 Questions (if you did Step 8)
 
@@ -598,7 +607,7 @@ In the channel from 4.2, type `@`, pick **kubesupport**, then try:
 1. `@kubesupport help`: the command list appears in the thread within seconds.
 2. `@kubesupport status`: open incidents.
 3. `@kubesupport pods <namespace>`: a pod table.
-4. `@kubesupport is anything unhealthy in <namespace>?`: "Looking into it…", then an answer card in the channel. This needs W8. On Groq's free plan the answer can take a few minutes.
+4. `@kubesupport is anything unhealthy in <namespace>?`: "Looking into it…", then an answer card in the channel. This needs W8. On a free plan (Groq, Gemini) the answer can take a few minutes.
 
 ### 9.3 A real incident
 
@@ -624,20 +633,7 @@ kubectl -n $NS delete deployment crash-test
 
 ## Step 10 — Day-to-day
 
-| Task | How |
-|---|---|
-| **Roll out a new image** (after CI pushed a new `latest`) | `kubectl -n kubesupport rollout restart deploy/kubesupport` |
-| **Pin or roll back a version** | `kubectl -n kubesupport set image deployment/kubesupport agent=docker.io/<W1>/kubesupport:sha-xxxxxxx`, and put the same tag in `deployment.yaml` so the next `apply` doesn't undo it |
-| **Change a setting** | Edit the ConfigMap in `deployment.yaml`, then `kubectl apply -f deploy/deployment.yaml && kubectl -n kubesupport rollout restart deploy/kubesupport` |
-| **Narrow incident alerts to some namespaces** | Set `ALLOWED_NAMESPACES` (e.g. `"payments,orders"`) in the ConfigMap, apply, restart. Read access stays cluster-wide. |
-| **Pause activity notices** | `ACTIVITY_ENABLED: "false"` in the ConfigMap, apply, restart. To remove the webhook completely: `kubectl delete validatingwebhookconfiguration kubesupport-activity` |
-| **Renew the webhook certificate** | `bash deploy/webhook-cert.sh` (any time; it's valid 10 years) |
-| **Change a secret** (new key, new Workflows URL) | Re-run the Step 5 `create secret` command with `--dry-run=client -o yaml \| kubectl apply -f -` on the end, then `kubectl -n kubesupport rollout restart deploy/kubesupport` |
-| **Pause alerts** | `WATCH_ENABLED: "false"` in the ConfigMap, apply, restart |
-| **See what it sees** | `/alerts/status`, `/activity/status`, `/activity` (Step 9.1 port-forward), `@kubesupport activity` in Teams, or `kubectl -n kubesupport logs deploy/kubesupport -f` |
-| **Uninstall** | `kubectl delete validatingwebhookconfiguration kubesupport-activity` **first** (it's cluster-wide), then `kubectl delete -f deploy/cloudflare-tunnel.yaml -f deploy/deployment.yaml` (this also deletes the namespace and the Secrets). Finally delete the tunnel in Cloudflare (its DNS record goes with it), and remove the outgoing webhook and the workflows in Teams. |
-| **Update cloudflared** | Change the image tag in `deploy/cloudflare-tunnel.yaml` to a newer release (Docker Hub `cloudflare/cloudflared` tags), then `kubectl apply -f deploy/cloudflare-tunnel.yaml`. The two pods are replaced one at a time, so questions keep working. |
-| **Tunnel token leaked** | Delete the tunnel in Cloudflare, then redo 8.1, 8.2 and 8.4 with a new tunnel: recreate the Secret with `--dry-run=client -o yaml \| kubectl apply -f -` and `kubectl -n kubesupport rollout restart deploy/kubesupport-tunnel` |
+Everything after installation (new images, changing settings and secrets, switching the AI provider, rotating tokens, uninstalling) is in [docs/OPERATIONS.md](OPERATIONS.md#day-to-day). How people use kubesupport is in [docs/USAGE.md](USAGE.md).
 
 ---
 
@@ -671,9 +667,9 @@ kubectl -n $NS delete deployment crash-test
 | Teams says "Sorry, there was a problem…" after `@kubesupport` | Wrong token (agent log: `Rejected /teams/webhook call`), or the URL isn't reachable |
 | "Looking into it…" but no answer card | `TEAMS_REPLY_WEBHOOK_URL` wrong, or that workflow is off (agent log: `Teams webhook … returned …`) |
 | "namespace … not allowed" | Add it to `ALLOWED_NAMESPACES` (or set it to `"*"`) |
-| Answers say "No AI model is configured" | `GROQ_API_KEY` (or `ANTHROPIC_API_KEY`) missing from the Secret, or the pod not restarted after adding it |
-| RCAs say `generated_by: heuristic` although a key is set | See `llm_error` in a `/rca` response. Possible causes: wrong key; Groq's daily limit used up (`rate limit, retry after …`); `MAX_LLM_RCA_PER_HOUR` reached; outbound HTTPS to `api.groq.com` (or `api.anthropic.com`) blocked |
-| AI answers take a few minutes | Normal on Groq's free plan: kubesupport waits for the per-minute token limit (agent log: `Model API returned 429; retrying in …`). A paid Groq plan is faster; then also raise `LLM_MAX_REQUEST_CHARS` and `LLM_TOOL_OUTPUT_CHARS` for fuller answers. |
+| Answers say "No AI model is configured" | `LLM_PROVIDER` is `none` or misspelled, or the key/model/endpoint it needs is missing. `/alerts/status` → `llm.status` says exactly what; so does the agent log at startup (`No AI model (…)`). Restart the pod after changing the Secret. |
+| RCAs say `generated_by: heuristic` although a key is set | See `llm_error` in a `/rca` response. Possible causes: wrong key; the provider's daily limit used up (`rate limit, retry after …`); `MAX_LLM_RCA_PER_HOUR` reached; outbound HTTPS to the provider blocked. Per-provider notes: [docs/AI_PROVIDERS.md](AI_PROVIDERS.md#troubleshooting) |
+| AI answers take a few minutes | Normal on free plans such as Groq's: kubesupport waits for the per-minute token limit (agent log: `Model API returned 429; retrying in …`). A paid Groq plan is faster; then also raise `LLM_MAX_REQUEST_CHARS` and `LLM_TOOL_OUTPUT_CHARS` for fuller answers. |
 | Too many incident alerts | Narrow `ALLOWED_NAMESPACES`, or raise `ALERT_COOLDOWN_MINUTES` |
 
 ---

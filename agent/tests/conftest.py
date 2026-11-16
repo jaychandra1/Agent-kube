@@ -11,10 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 # Environment must be set before the agent modules are imported.
-for _key in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "LLM_API_KEY", "LLM_BASE_URL", "LLM_PROVIDER", "AGENT_MODEL",
-             "AGENT_EFFORT", "LLM_MAX_STEPS", "LLM_TOOL_OUTPUT_CHARS", "LLM_MAX_REQUEST_CHARS",
-             "LLM_MAX_OUTPUT_TOKENS"):
-    os.environ.pop(_key, None)  # tests start in rules-only mode, whatever the shell has set
+# Tests start in rules-only mode, whatever the shell has set.
+PROVIDER_KEYS = ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "CURSOR_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY",
+                 "AZURE_OPENAI_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_API_KEY", "OLLAMA_API_KEY")
+for _key in [k for k in os.environ if k.startswith("LLM_")] + list(PROVIDER_KEYS):
+    os.environ.pop(_key, None)
 os.environ["ALLOWED_NAMESPACES"] = "default,apps"
 os.environ["WATCH_ENABLED"] = "false"
 TEST_SECRET = base64.b64encode(b"test-outgoing-webhook-secret").decode()
@@ -72,3 +73,13 @@ SAMPLE_RCA = {
     "confidence": "high",
     "stakeholder_summary": "The web service is restarting.",
 }
+
+
+def fake_llm(kind="chat", steps=14, **extra):
+    """Stand-in for agent.llm: an AI provider of the given shape (see providers/base.py)."""
+    from providers import Limits
+    fake = NS(kind=kind, name="fake", title="Fake model", model="fake-1",
+              limits=Limits(steps=steps, tool_chars=15000, request_chars=60000, output_tokens=4000, timeout=10),
+              **extra)
+    fake.describe = lambda: {"provider": fake.name, "title": fake.title, "model": fake.model, "kind": fake.kind}
+    return fake

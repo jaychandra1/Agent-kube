@@ -1,15 +1,16 @@
-"""OpenAI-compatible chat API client (Groq, OpenAI, vLLM, Ollama, ...), used when no
-Anthropic key is available.
+"""Any OpenAI-compatible Chat Completions API: Groq, Google Gemini, OpenAI, Azure OpenAI
+(Microsoft Foundry), OpenRouter, Mistral, Ollama, or a custom endpoint (see catalog.py).
 
 agent.py keeps its conversation in one canonical shape (the Anthropic Messages shape:
-assistant turns hold "text" and "tool_use" blocks, tool results come back as "tool_result"
+assistant turns hold "text" and "tool_use" blocks; tool results come back as "tool_result"
 blocks in a user turn). This module converts that history to Chat Completions messages on
 every call and converts the reply back, so the investigation loop is the same for every
 provider.
 
-Groq's per-minute token limits are small (e.g. 8K tokens/minute for openai/gpt-oss-120b on
-the base Developer plan), so each request is kept under a character budget by shortening the
-oldest tool results first, and 429 replies are retried after the `retry-after` delay.
+Free plans have small per-minute token limits (Groq's free plan: about 8K tokens per minute,
+and a single bigger request is refused). So each request is kept under a character budget by
+shortening the oldest tool results first, "too many requests" replies are retried after the
+`retry-after` delay, and a request the server calls too large is resent with less history.
 """
 import json
 import logging
@@ -18,9 +19,10 @@ from types import SimpleNamespace as NS
 
 import requests
 
+from .base import ChatProvider, Limits, ProviderError, response
+
 logger = logging.getLogger("kubesupport.llm")
 
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 TRIMMED = "... [older tool output trimmed to fit the model's request size limit]"
 
 
@@ -88,7 +90,7 @@ def fit_budget(messages: list[dict], max_chars: int, keep_last: int = 2) -> list
 
 
 def from_openai_response(data: dict) -> NS:
-    """Chat Completions reply -> object with .stop_reason and .content blocks (text / tool_use)."""
+    """Chat Completions reply -> response(...) with text / tool_use blocks."""
     choice = (data.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
     blocks = []
@@ -106,29 +108,36 @@ def from_openai_response(data: dict) -> NS:
     else:
         stop = {"stop": "end_turn", "length": "max_tokens", "content_filter": "refusal"}.get(
             choice.get("finish_reason"), "end_turn")
-    return NS(stop_reason=stop, content=blocks)
+    return response(stop, blocks)
 
 
-class OpenAICompatibleClient:
-    """Minimal Chat Completions client with tools, retries and a request-size budget.
+class OpenAICompatibleProvider(ChatProvider):
+    """Chat Completions with tools, retries and a request-size budget.
 
-    `max_request_chars` covers the messages plus the tool definitions; together with
-    `max_completion_tokens` it keeps one request under a per-minute token limit (Groq
-    rejects a request larger than that limit outright)."""
+    `limits.request_chars` covers the messages plus the tool definitions; together with
+    `limits.output_tokens` it keeps one request under a per-minute token limit."""
 
-    def __init__(self, base_url: str, api_key: str, model: str, reasoning_effort: str | None = None,
-                 max_completion_tokens: int = 2500, max_request_chars: int = 14000,
-                 timeout: float = 120, attempts: int = 5, max_wait: float = 60):
+    def __init__(self, name: str, title: str, model: str, limits: Limits, base_url: str, api_key: str = "",
+                 auth: str = "bearer", reasoning_effort: str = "", attempts: int = 5, max_wait: float = 60):
+        super().__init__(name, title, model, limits)
+        if not base_url:
+            raise ProviderError(f"{title} needs LLM_BASE_URL")
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
-        self.model = model
+        self.api_key, self.auth = api_key, auth
         self.reasoning_effort = reasoning_effort
-        self.max_completion_tokens = max_completion_tokens
-        self.max_request_chars = max_request_chars
-        self.timeout, self.attempts, self.max_wait = timeout, attempts, max_wait
+        self.attempts, self.max_wait = attempts, max_wait
+
+    def _headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            if self.auth == "api-key":  # Azure OpenAI key authentication
+                headers["api-key"] = self.api_key
+            else:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def _payload(self, system, messages, tools, require_tool, max_chars):
-        payload = {"model": self.model, "max_completion_tokens": self.max_completion_tokens}
+        payload = {"model": self.model, "max_completion_tokens": self.limits.output_tokens}
         if tools:
             payload["tools"] = to_openai_tools(tools)
             payload["tool_choice"] = ({"type": "function", "function": {"name": require_tool}}
@@ -139,28 +148,24 @@ class OpenAICompatibleClient:
         payload["messages"] = fit_budget(to_openai_messages(system, messages), room)
         return payload
 
-    @staticmethod
-    def _compatible(payload: dict) -> dict:
+    def _compatible(self, payload: dict) -> dict:
         """The same request without optional fields some servers reject."""
         p = dict(payload)
         if "tools" in p:
             p["tool_choice"] = "auto"
         p.pop("reasoning_effort", None)
-        p["max_tokens"] = p.pop("max_completion_tokens", 3000)
+        p["max_tokens"] = p.pop("max_completion_tokens", self.limits.output_tokens)
         return p
 
-    def create(self, system: str, messages: list[dict], tools: list[dict], require_tool: str | None = None) -> NS:
-        budget = self.max_request_chars
+    def create(self, system, messages, tools, require_tool=None):
+        budget = self.limits.request_chars
         payload = self._payload(system, messages, tools, require_tool, budget)
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
         tried_compatible = False
         last_error = "no attempt made"
         for attempt in range(1, self.attempts + 1):
             try:
-                r = requests.post(f"{self.base_url}/chat/completions", json=payload, headers=headers,
-                                  timeout=self.timeout)
+                r = requests.post(f"{self.base_url}/chat/completions", json=payload, headers=self._headers(),
+                                  timeout=self.limits.timeout)
             except requests.RequestException as e:
                 last_error = type(e).__name__
                 time.sleep(min(2 ** attempt, self.max_wait))
@@ -192,4 +197,4 @@ class OpenAICompatibleClient:
                 time.sleep(wait)
                 continue
             break
-        raise RuntimeError(f"model API error ({self.base_url}): {last_error}")
+        raise ProviderError(f"{self.title} API error ({self.base_url}): {last_error}")

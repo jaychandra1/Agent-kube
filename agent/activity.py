@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 
 import cards
 import teams
+from tools import redact
 
 logger = logging.getLogger("kubesupport.activity")
 
@@ -45,6 +46,9 @@ IGNORE_NAMESPACES = set(_list(os.getenv("ACTIVITY_IGNORE_NAMESPACES", "kube-node
 TLS_DIR = os.getenv("WEBHOOK_TLS_DIR", "/etc/kubesupport/webhook-tls")
 TARGETS = teams.parse_targets(os.getenv("TEAMS_ACTIVITY_WEBHOOK_URLS", ""), "activity") or teams.ALERT_TARGETS
 MAX_CARD_LINES = 30
+MAX_PENDING = 2000      # events held between two cards; more are counted but dropped (protects memory)
+# Why the HTTPS server on 8443 isn't running, if it was meant to (set by main.py)
+SERVER_ERROR = None
 
 CONNECT_ACTIONS = {"exec": "exec", "attach": "attach", "portforward": "port-forward"}
 RBAC = {"roles", "rolebindings", "clusterroles", "clusterrolebindings"}
@@ -112,7 +116,7 @@ def parse_admission(review: dict) -> dict | None:
         options = req.get("object") or {}
         event.update(category="exec", action=CONNECT_ACTIONS[sub], kind="Pod",
                      container=options.get("container") or "",
-                     command=" ".join(options.get("command") or [])[:200],
+                     command=redact(" ".join(options.get("command") or []))[:200],
                      ports=",".join(str(p) for p in options.get("ports") or []))
         return event
 
@@ -176,6 +180,7 @@ class ActivityFeed:
         self.recent = deque(maxlen=500)
         self.calls_total = 0
         self.events_total = 0
+        self.dropped_total = 0
         self.last_call = None
         self.last_sent = None
         self._stop = threading.Event()
@@ -188,9 +193,12 @@ class ActivityFeed:
 
     def record(self, event: dict):
         with self._lock:
-            self.pending.append(event)
-            self.recent.append(event)
             self.events_total += 1
+            self.recent.append(event)
+            if len(self.pending) >= MAX_PENDING:
+                self.dropped_total += 1
+                return
+            self.pending.append(event)
 
     def flush(self) -> dict | None:
         """Send everything collected since the last flush as one card (None when there was nothing)."""
@@ -225,8 +233,11 @@ class ActivityFeed:
         self._thread = threading.Thread(target=self.run, name="activity", daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self, wait_seconds: float = 10.0):
+        """Stop, and wait briefly for the last card to be sent."""
         self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=wait_seconds)
 
     def latest(self, n: int = 20) -> list[dict]:
         with self._lock:
@@ -237,6 +248,8 @@ class ActivityFeed:
             return {
                 "enabled": ENABLED,
                 "webhook_certificate": tls_files() is not None,
+                "webhook_server_error": SERVER_ERROR,
+                "events_dropped_total": self.dropped_total,
                 "webhook_calls_total": self.calls_total,
                 "last_webhook_call_epoch": self.last_call,
                 "events_total": self.events_total,

@@ -33,8 +33,9 @@ def test_teams_webhook_disabled_without_secret(client, monkeypatch):
 
 def test_alerts_test_posts_sample_card(client, monkeypatch):
     sent = []
+    monkeypatch.setattr(app_module, "API_KEY", "k")
     monkeypatch.setattr(teams, "post_card", lambda urls, card: sent.append((urls, card)) or [{"ok": True}])
-    r = client.post("/alerts/test")
+    r = client.post("/alerts/test", headers={"x-api-key": "k"})
     assert r.status_code == 200 and r.json()["sent_to"] == 1
     assert sent[0][0] == [("alert-1", "https://example.invalid/alert")]
 

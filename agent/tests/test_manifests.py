@@ -5,6 +5,7 @@ from pathlib import Path
 import yaml
 
 import activity
+from providers import CATALOG
 
 ROOT = Path(__file__).resolve().parents[2]
 AGENT_DIR = ROOT / "agent"
@@ -20,16 +21,18 @@ def by_kind(docs, kind):
 
 
 def settings_read_by_code() -> set:
-    names = set()
-    for f in AGENT_DIR.glob("*.py"):
-        names |= set(re.findall(r'(?:os\.getenv|_env_float)\("([A-Z_]+)"', f.read_text(encoding="utf-8")))
+    """Every environment variable the agent reads, including each provider's own key name."""
+    names = {spec.key_env for spec in CATALOG.values()}
+    for f in [*AGENT_DIR.glob("*.py"), *AGENT_DIR.glob("providers/*.py")]:
+        names |= set(re.findall(r'(?:os\.getenv\(|_env_float\(|_setting\(env, |_number\(env, )"([A-Z_]+)"',
+                                f.read_text(encoding="utf-8")))
     return names
 
 
 DOCS = load("deployment.yaml")
 WEBHOOK_DOCS = load("activity-webhook.yaml")
 TUNNEL_DOCS = load("cloudflare-tunnel.yaml")
-SECRET_KEYS = {"GROQ_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY", "AGENT_API_KEY", "TEAMS_ALERT_WEBHOOK_URLS",
+SECRET_KEYS = {"LLM_API_KEY", "GROQ_API_KEY", "CURSOR_API_KEY", "AGENT_API_KEY", "TEAMS_ALERT_WEBHOOK_URLS",
                "TEAMS_REPLY_WEBHOOK_URL", "TEAMS_OUTGOING_WEBHOOK_SECRET"}
 
 
@@ -64,6 +67,8 @@ def test_configmap_keys_are_real_settings():
     assert not unknown, f"ConfigMap keys the code never reads: {unknown}"
     assert cm["data"]["ALLOWED_NAMESPACES"] == "*"
     assert cm["data"]["ACTIVITY_IGNORE_USERS"] == activity.DEFAULT_IGNORE_USERS
+    assert cm["data"]["LLM_PROVIDER"] in CATALOG  # one provider, named explicitly
+    assert not any(k.endswith("_API_KEY") for k in cm["data"]), "keys belong in the Secret"
 
 
 def test_secret_keys_are_real_settings():
@@ -84,7 +89,7 @@ def test_deployment():
     assert env_from["configMapRef"]["configMapRef"]["name"] == "kubesupport-config"
     assert env_from["secretRef"]["secretRef"] == {"name": "kubesupport-secrets", "optional": True}
     assert c["securityContext"]["readOnlyRootFilesystem"] is True
-    assert c["readinessProbe"]["httpGet"]["path"] == "/healthz"
+    assert c["readinessProbe"]["httpGet"]["path"] == "/ready" and c["livenessProbe"]["httpGet"]["path"] == "/healthz"
     mounts = {m["name"]: m for m in c["volumeMounts"]}
     assert mounts["tmp"]["mountPath"] == "/tmp"
     assert mounts["webhook-tls"]["mountPath"] == activity.TLS_DIR and mounts["webhook-tls"]["readOnly"] is True

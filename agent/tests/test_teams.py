@@ -8,7 +8,7 @@ import pytest
 
 import agent
 import teams
-from conftest import TEST_SECRET
+from conftest import TEST_SECRET, fake_llm
 
 
 def sign(body: bytes) -> str:
@@ -96,7 +96,7 @@ def test_question_without_an_ai_model():
 
 
 def test_question_is_answered_later_through_reply_webhook(monkeypatch, posted):
-    monkeypatch.setattr(agent, "client", object())
+    monkeypatch.setattr(agent, "llm", fake_llm())
     monkeypatch.setattr(agent, "chat", lambda msgs, q: f"answer to: {q}")
     reply = teams.handle_outgoing(activity("<at>kubesupport</at> why is web down?"))
     assert reply["text"].startswith("Looking into it")

@@ -4,7 +4,7 @@
 # Before applying, edit two things (search for "EDIT"):
 #   1. The image: your Docker Hub user/org.
 #   2. The ConfigMap: CLUSTER_NAME (and ALLOWED_NAMESPACES if you want alerts for some namespaces only).
-# Create the Secret "kubesupport-secrets" first (Configuration.md, step 5), then:
+# Create the Secret "kubesupport-secrets" first (docs/INSTALLATION.md, step 5), then:
 #   kubectl apply -f deploy/deployment.yaml
 # For activity notices (exec, new services, RBAC changes, ...) also run deploy/webhook-cert.sh.
 #
@@ -118,17 +118,22 @@ metadata:
   labels:
     app.kubernetes.io/name: kubesupport
 data:
-  CLUSTER_NAME: ""                 # EDIT: shown on every Teams message, e.g. "prod-eks"
+  CLUSTER_NAME: "Cashier-Dev"                 # EDIT: shown on every Teams message, e.g. "prod-eks"
+  TIMEZONE: "Asia/Kolkata"         # EDIT: time zone for times in RCAs and reports (IANA name, e.g. "Europe/London"; default UTC)
+  LOG_LEVEL: "INFO"                # DEBUG | INFO | WARNING | ERROR
   ALLOWED_NAMESPACES: "*"          # namespaces for incident alerts and Teams answers; "*" = all (permissions are cluster-wide either way)
-  LLM_PROVIDER: "auto"             # AI model: auto (uses whichever key is in the Secret) | groq | anthropic | openai | none
-  AGENT_MODEL: ""                  # "" = provider default (Groq: openai/gpt-oss-120b; Claude: claude-opus-5-5)
-  AGENT_EFFORT: ""                 # "" = provider default; low | medium | high ("none" = don't send)
-  LLM_MAX_STEPS: ""                # "" = provider default (Groq: 8 model calls per answer or RCA; Claude: 14)
-  LLM_TOOL_OUTPUT_CHARS: ""        # "" = provider default (Groq: 2500 characters per tool result; Claude: 15000)
-  LLM_MAX_REQUEST_CHARS: ""        # "" = provider default (Groq: 14000 characters per request); raise on a paid Groq plan
-  LLM_MAX_OUTPUT_TOKENS: ""        # "" = provider default (Groq: 2500 tokens per reply)
-  LLM_BASE_URL: ""                 # only for LLM_PROVIDER "openai" (any OpenAI-compatible endpoint)
-  AGENT_FALLBACKS: "default"       # Claude only: refusal fallback; "off" to disable
+  # ── AI model (docs/AI_PROVIDERS.md). The key goes in the Secret as LLM_API_KEY. ──
+  LLM_PROVIDER: "groq"             # EDIT: groq | anthropic | cursor | gemini | openai | azure-openai | openrouter | mistral | ollama | custom | none
+  LLM_MODEL: ""                    # "" = the provider's default model (required for openai, azure-openai, ollama, custom)
+  LLM_BASE_URL: ""                 # "" = the provider's default endpoint (required for azure-openai, ollama, custom)
+  LLM_EFFORT: ""                   # "" = provider default; low | medium | high ("none" = don't send)
+  LLM_MAX_STEPS: ""                # "" = provider default: model calls per answer or RCA
+  LLM_TOOL_OUTPUT_CHARS: ""        # "" = provider default: characters of one tool result given to the model
+  LLM_MAX_REQUEST_CHARS: ""        # "" = provider default: size of one request (raise on a paid Groq plan)
+  LLM_MAX_OUTPUT_TOKENS: ""        # "" = provider default: longest reply
+  LLM_TIMEOUT_SECONDS: ""          # "" = provider default: one model call (Cursor: one whole run)
+  LLM_FALLBACKS: "default"         # Claude only: server-side refusal fallback; "off" to disable
+  LLM_DEADLINE_SECONDS: "300"      # longest an AI answer or RCA may take; then the built-in rules answer
   WATCH_ENABLED: "true"            # "false" = no incident alerts (questions still work)
   WATCH_INTERVAL_SECONDS: "60"     # how often the cluster is checked for failing pods
   ALERT_COOLDOWN_MINUTES: "60"     # reminder for a still-open incident at most this often
@@ -162,9 +167,6 @@ spec:
       labels:
         app.kubernetes.io/name: kubesupport
       annotations:
-        # Opt out of automatic OpenTelemetry injection (e.g. the CloudWatch Observability add-on's
-        # Application Signals "auto monitor"). Its injected containers don't meet this namespace's
-        # "restricted" Pod Security level, so the pod would be refused (Configuration.md, Troubleshooting).
         instrumentation.opentelemetry.io/inject-java: "false"
         instrumentation.opentelemetry.io/inject-python: "false"
         instrumentation.opentelemetry.io/inject-nodejs: "false"
@@ -180,7 +182,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: docker.io/jayachandra261020/kubesupport:latest   # EDIT: your Docker Hub user/org (or pin a sha-xxxxxxx tag)
+          # EDIT: your Docker Hub user/org. In production pin a tag CI pushed (sha-xxxxxxx) so a restart
+          # never picks up an untested image; ":latest" + Always is convenient for testing only.
+          image: docker.io/jayachandra261020/kubesupport:latest
           imagePullPolicy: Always
           ports:
             - name: http             # internal API and health checks (never exposed)
@@ -193,31 +197,33 @@ spec:
             - configMapRef:
                 name: kubesupport-config
             - secretRef:
-                name: kubesupport-secrets   # GROQ_API_KEY (or ANTHROPIC_API_KEY), AGENT_API_KEY, TEAMS_* (Configuration.md, step 5)
+                name: kubesupport-secrets   # LLM_API_KEY, AGENT_API_KEY, TEAMS_* (docs/INSTALLATION.md, Step 5)
                 optional: true
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          readinessProbe:
+          readinessProbe:              # the API is up
             httpGet:
-              path: /healthz
+              path: /ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-          livenessProbe:
+          livenessProbe:               # fails when the watcher stops scanning or the Teams server dies: restart
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 15
-            periodSeconds: 20
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
               cpu: 50m
               memory: 128Mi
             limits:
-              memory: 512Mi
+              memory: 1Gi              # headroom for large clusters and the Cursor provider's helper process
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -225,8 +231,9 @@ spec:
               mountPath: /etc/kubesupport/webhook-tls
               readOnly: true
       volumes:
-        - name: tmp
-          emptyDir: {}
+        - name: tmp                  # the only writable place: reports, the Cursor SDK's state (HOME=/tmp)
+          emptyDir:
+            sizeLimit: 512Mi
         - name: webhook-tls          # created by deploy/webhook-cert.sh; until then the webhook is simply off
           secret:
             secretName: kubesupport-webhook-tls
@@ -267,7 +274,7 @@ spec:
 ---
 # ── NETWORK POLICY: who may connect to the kubesupport pod ─────────────────────
 # Enforced when the cluster runs a network-policy engine (on EKS: the VPC CNI with network
-# policy turned on; Configuration.md, Step 3.4). Without one it is simply ignored.
+# policy turned on; docs/INSTALLATION.md, Step 3.4). Without one it is simply ignored.
 #   8080 (Teams webhook)      only from the Cloudflare Tunnel pods
 #   8443 (activity webhook)   from the Kubernetes API server (EKS control plane)
 #   8000 (internal API)       from no pod at all; kubectl port-forward and health checks still work

@@ -29,7 +29,8 @@ class FakeResource:
         self.items = list(items)
         self.calls = []
 
-    def get(self, name=None, namespace=None):
+    def get(self, name=None, namespace=None, limit=None, _request_timeout=None):
+        assert _request_timeout, "every API call needs a timeout"
         self.calls.append((name, namespace))
         if name:
             return FakeObj(next(i for i in self.items if i["metadata"]["name"] == name

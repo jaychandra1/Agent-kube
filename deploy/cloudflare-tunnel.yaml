@@ -8,7 +8,7 @@
 # POST /teams/webhook and nothing else). Nothing in AWS accepts connections from the
 # internet: no load balancer, no public IP, no open port.
 #
-# Before applying (Configuration.md, Step 8):
+# Before applying (docs/INSTALLATION.md, Step 8):
 #   1. create the tunnel and its route in the Cloudflare dashboard,
 #   2. store the tunnel token in the cluster:
 #      kubectl -n kubesupport create secret generic kubesupport-tunnel --from-literal=TUNNEL_TOKEN='<token>'
@@ -53,7 +53,7 @@ spec:
               app.kubernetes.io/name: kubesupport-tunnel
       containers:
         - name: cloudflared
-          image: docker.io/cloudflare/cloudflared:2026.10.7   # pinned; update on purpose (Configuration.md, Step 10)
+          image: docker.io/cloudflare/cloudflared:2026.10.7   # pinned; update on purpose (docs/INSTALLATION.md, Step 10)
           args:                        # order matters: "run" comes last
             - tunnel
             - --no-autoupdate

@@ -19,7 +19,7 @@ import os
 import re
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import requests
@@ -62,11 +62,18 @@ QUICK_TIMEOUT_SECONDS = 4.0      # Teams waits 5 s for an outgoing-webhook reply
 MAX_REPLY_CHARS = 3500
 POST_ATTEMPTS = 3                # Workflows throttles >4 requests/s (HTTP 429); retry with backoff
 
-_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="teams")
+# Quick commands and slow AI work get separate workers, so a few long investigations never
+# make `status` or `pods` miss Teams' 5-second limit.
+_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="teams-quick")
+_slow_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="teams-slow")
+MAX_SLOW_WAITING = 6             # questions/RCAs running or queued; more get a "busy" reply
+_slow_slots = threading.BoundedSemaphore(MAX_SLOW_WAITING)
 _seen_ids = deque(maxlen=500)    # Teams can resend the same message; answer once
 _seen_lock = threading.Lock()
-_sessions: dict[str, list] = {}  # AI chat history per channel thread
-_session_locks: dict[str, threading.Lock] = {}
+# AI chat history per channel thread (and per /chat session): bounded in number and age
+MAX_SESSIONS = 200
+SESSION_IDLE_SECONDS = 24 * 3600
+_sessions: "OrderedDict[str, dict]" = OrderedDict()
 _sessions_lock = threading.Lock()
 
 
@@ -257,18 +264,39 @@ def _activity_text() -> str:
         f"- {e['time'][11:19]} UTC - {activity.describe(e)}" for e in events)
 
 
-def _session_for(conv_id: str):
+def session_for(conv_id: str) -> dict:
+    """{"messages", "lock"} for one conversation. Idle conversations expire after a day, and at
+    most MAX_SESSIONS are kept (least recently used first out)."""
+    now = time.time()
     with _sessions_lock:
-        return _sessions.setdefault(conv_id, []), _session_locks.setdefault(conv_id, threading.Lock())
+        for key in [k for k, v in _sessions.items() if now - v["used"] > SESSION_IDLE_SECONDS]:
+            del _sessions[key]
+        session = _sessions.pop(conv_id, None) or {"messages": [], "lock": threading.Lock()}
+        session["used"] = now
+        _sessions[conv_id] = session
+        while len(_sessions) > MAX_SESSIONS:
+            _sessions.popitem(last=False)
+        return session
 
 
-def _answer_question(conv_id: str, question: str) -> str:
-    msgs, lock = _session_for(conv_id)
-    with lock:
-        answer = agent.chat(msgs, question)
-        if len(msgs) > 40:
-            _sessions[conv_id] = agent.trim_history(msgs, keep=20)
+def answer_in_session(conv_id: str, question: str) -> str:
+    session = session_for(conv_id)
+    with session["lock"]:
+        if len(session["messages"]) > 30:  # keep each request small, before and after the call
+            session["messages"] = agent.trim_history(session["messages"], keep=20)
+        answer = agent.chat(session["messages"], question)
+        if len(session["messages"]) > 30:
+            session["messages"] = agent.trim_history(session["messages"], keep=20)
     return answer
+
+
+def _submit_slow(fn, *args):
+    """Run slow work on its own workers; None when too much is already waiting."""
+    if not _slow_slots.acquire(blocking=False):
+        return None
+    future = _slow_pool.submit(fn, *args)
+    future.add_done_callback(lambda _f: _slow_slots.release())
+    return future
 
 
 def _run_rca(args: list[str]) -> dict:
@@ -351,18 +379,17 @@ def handle_outgoing(activity: dict) -> dict:
             return _reply(f"Sorry, that failed: {type(e).__name__}: {e}")
 
     # Slow work: AI questions and RCAs
-    if cmd == "ask" and not agent.client:
-        return _reply("No AI model is configured for this agent (GROQ_API_KEY or ANTHROPIC_API_KEY), "
+    if cmd == "ask" and not agent.llm:
+        return _reply("No AI model is configured for this agent (LLM_PROVIDER and LLM_API_KEY), "
                       "so I can only run commands.\n\n" + HELP)
     if not REPLY_TARGET:
         return _reply("I need a Teams reply webhook (TEAMS_REPLY_WEBHOOK_URL) to send answers that take "
                       "longer than a few seconds. Commands like `status` and `pods <namespace>` still work.")
-    if cmd == "rca":
-        future = _pool.submit(_run_rca, args)
-        _deliver_later(future, asked_by, text, is_rca=True)
-    else:
-        future = _pool.submit(_answer_question, conv_id, text)
-        _deliver_later(future, asked_by, text, is_rca=False)
+    future = _submit_slow(_run_rca, args) if cmd == "rca" else _submit_slow(answer_in_session, conv_id, text)
+    if future is None:
+        return _reply("I'm busy with other investigations right now. Please ask again in a few minutes; "
+                      "quick commands such as `status` still work.")
+    _deliver_later(future, asked_by, text, is_rca=cmd == "rca")
     return _reply("Looking into it - I'll post the answer in this channel.")
 
 
