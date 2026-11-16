@@ -5,7 +5,7 @@
 - The agent is a **public Docker image** on your Docker Hub account.
 - You install it with **one file**, [`deploy/deployment.yaml`](deploy/deployment.yaml). That file holds the namespace, the **cluster-wide read-only permissions** (every object in every namespace, never Secrets), the settings and the Deployment.
 - **Activity notices** (who exec'd into a pod, created or deleted a service or app, changed permissions, changed an image or scaled) come from an admission webhook. Set it up with one script, [`deploy/webhook-cert.sh`](deploy/webhook-cert.sh) (Step 7b).
-- The optional [`deploy/ingress.yaml`](deploy/ingress.yaml) lets you ask questions from a Teams channel.
+- The optional [`deploy/cloudflare-tunnel.yaml`](deploy/cloudflare-tunnel.yaml) lets you ask questions from a Teams channel through a Cloudflare Tunnel. The cluster opens that connection outward, so nothing in AWS is exposed to the internet.
 - Alerts go to a Teams chat and channel that you own.
 
 Follow the steps in order. Each one says **what to do**, **how to check it worked**, and **what to write down**. For how the agent works, see [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md).
@@ -16,18 +16,18 @@ Follow the steps in order. Each one says **what to do**, **how to check it worke
 
 ## Step 0 — Fill in this worksheet first
 
-| #   | Value                                                  | Example                                                 | Yours                  |
-| --- | ------------------------------------------------------ | ------------------------------------------------------- | ---------------------- |
-| W1  | Docker Hub user or organization                        | `jaychandra1`                                           | jayachandra261020      |
-| W2  | EKS cluster name                                       | `prod-eks`                                              | dev-env-cluster        |
-| W3  | AWS region of the cluster                              | `ap-south-1`                                            | eu-west-1              |
-| W4  | Namespaces to watch: **all**, or a list                | `all` or `payments,orders`                              | all                    |
-| W5  | Public hostname for questions from Teams               | `kubesupport.example.com`                               | kubesupport.appmco.xyz |
-| W6  | Your ingress class (Step 3.4)                          | `nginx` or `alb`                                        | alb                    |
-| W7  | TLS for that ingress                                   | cert-manager ClusterIssuer name, or ACM certificate ARN | ACM Certificate        |
-| W8  | Groq API key (optional: AI answers and RCAs; Step 5.1) | `gsk_…`                                                 |                        |
+| #   | Value                                                  | Example                                | Yours                                     |
+| --- | ------------------------------------------------------ | -------------------------------------- | ----------------------------------------- |
+| W1  | Docker Hub user or organization                        | `jaychandra1`                          | jayachandra261020                         |
+| W2  | EKS cluster name                                       | `prod-eks`                             | dev-env-cluster                           |
+| W3  | AWS region of the cluster                              | `ap-south-1`                           | eu-west-1                                 |
+| W4  | Namespaces to watch: **all**, or a list                | `all` or `payments,orders`             | all                                       |
+| W5  | Public hostname for questions from Teams               | `kubesupport.example.com`              | [app.appgpc2.xyz](http://app.appgpc2.xyz) |
+| W6  | Your domain in Cloudflare (it holds W5)                | `example.com`                          | appgpc2.xyz                               |
+| W7  | Microsoft 365 tenant ID (Step 8.5)                     | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |                                           |
+| W8  | Groq API key (optional: AI answers and RCAs; Step 5.1) | `gsk_…`                                |                                           |
 
-Collected along the way (keep them safe; D1 and T1–T3 work like passwords):
+Collected along the way (keep them safe; D1, T1–T3 and C1 work like passwords):
 
 | # | Value | From step |
 |---|---|---|
@@ -36,6 +36,7 @@ Collected along the way (keep them safe; D1 and T1–T3 work like passwords):
 | T2 | Workflows URL: answers in the questions channel | 4.2 |
 | T3 | Outgoing webhook security token | 4.3 |
 | T4 | Workflows URL: alerts to a private channel (optional) | 4.4 |
+| C1 | Cloudflare tunnel token | 8.1 |
 
 ---
 
@@ -154,21 +155,39 @@ kubectl delete pod pull-check
 
 ✅ **Check:** prints `pull ok`. If the pod stays in `ImagePullBackOff`, see the troubleshooting table.
 
-### 3.4 Ingress class (only for questions from Teams) → W6
+### 3.4 Network policies (recommended)
+
+`deploy/deployment.yaml` and `deploy/cloudflare-tunnel.yaml` include **NetworkPolicies**:
+
+- only the tunnel pods may connect to kubesupport's Teams port (8080);
+- no pod may connect to kubesupport's internal API (8000);
+- nothing may connect to the tunnel pods.
+
+EKS enforces NetworkPolicies only when the VPC CNI's network policy feature is on. Check:
 
 ```bash
-kubectl get ingressclass
+kubectl -n kube-system get daemonset aws-node -o yaml | grep -e "--enable-network-policy"
 ```
 
-📝 **Write down the NAME** (e.g. `nginx` or `alb`). The ingress must be **internet-facing**, because Teams calls it from the internet.
+✅ **Check:** `--enable-network-policy=true`.
 
-- NGINX: `kubectl get svc -A | grep -i ingress` should show a public `*.elb.amazonaws.com` address.
-- ALB: you'll set `scheme: internet-facing` in Step 8.
+If it says `false` (and `vpc-cni` is an EKS add-on in your cluster), turn it on:
+
+```bash
+aws eks update-addon --region <W3> --cluster-name <W2> --addon-name vpc-cni \
+  --configuration-values '{"enableNetworkPolicy":"true"}'
+```
+
+- **What this changes:** only pods that a NetworkPolicy selects are affected. If other namespaces already contain NetworkPolicies that were never enforced, they start being enforced too, so check with your cluster admin first.
+- **Other engines:** a cluster running Calico or Cilium enforces the policies already.
+- **No engine at all:** kubesupport still works, but the policies are not enforced.
 
 ### 3.5 Optional
 
 - **Pod CPU/memory for the AI model** needs **metrics-server**. Check with `kubectl top pods -A`. To add it: `aws eks create-addon --region <W3> --cluster-name <W2> --addon-name metrics-server`, or use its official Helm chart if the add-on isn't offered for your version.
-- **Restricted outbound traffic:** allow the agent HTTPS (443) to `api.groq.com` (or `api.anthropic.com` if you use Claude) and to your Workflows URL hosts (T1/T2, e.g. `*.powerplatform.com` or `*.logic.azure.com`).
+- **Restricted outbound traffic:**
+  - allow the agent HTTPS (443) to `api.groq.com` (or `api.anthropic.com` if you use Claude) and to your Workflows URL hosts (T1/T2, e.g. `*.powerplatform.com` or `*.logic.azure.com`);
+  - allow the tunnel pods outbound TCP **and** UDP port **7844** to Cloudflare (`region1.v2.argotunnel.com`, `region2.v2.argotunnel.com`).
 
 ---
 
@@ -186,11 +205,17 @@ Want alerts in a channel too, including a private one? See 4.4. You can give the
 ### 4.2 Answers in the questions channel → T2
 
 1. Use a **standard channel** in a team you own, e.g. `#kubesupport`. *Asking questions* needs a standard channel, because Teams outgoing webhooks don't work in private channels. Alerts can still go to private channels (4.4).
+
+   For security, make it a **private team** with only the people who may ask kubesupport as members: only a team's members can @mention its outgoing webhook (8.5).
 2. In that channel: **…** → **Workflows** → **"Send webhook alerts to a channel"** → select that team and channel → **Create** → **copy the URL**. 📝 **T2**
 
 ### 4.3 The outgoing webhook (questions) → T3
 
-1. Team **…** → **Manage team** → **Apps** tab → **Create an outgoing webhook** (bottom right).
+1. Team **…** → **Manage team** → **Apps** tab → click the **Upload an app ⌄** dropdown (top left, next to **Get more apps**) → **Create an outgoing webhook**. (Older Teams versions showed it as a link at the bottom right of the Apps tab.)
+   - **Not in the dropdown?** Custom apps are switched off for you:
+     - First, as team owner: team **…** → **Manage team** → **Settings** → **Member permissions** → tick **Allow members to upload custom apps**.
+     - If it's still missing, a Teams admin must allow custom apps: Teams admin center → **Teams apps** → **Manage apps** → **Org-wide app settings** → **Let users interact with custom apps** on. Then **Teams apps** → **Setup policies** → your policy → **Upload custom apps** on.
+     - Admin changes can take a few hours to reach your Teams client.
 2. Fill in:
    - **Name:** `kubesupport` (what people @mention)
    - **Callback URL:** `https://<W5>/teams/webhook`
@@ -410,36 +435,135 @@ kubectl -n default delete service kubesupport-test
 
 ---
 
-## Step 8 — Public address for questions (skip if alerts only)
+## Step 8 — Questions from Teams through Cloudflare Tunnel (skip if alerts only)
 
-### 8.1 Edit `deploy/ingress.yaml`
+Teams sends every `@kubesupport` message from Microsoft's cloud to `https://<W5>/teams/webhook`. With Cloudflare Tunnel, **nothing in AWS accepts connections from the internet**: no load balancer, no public IP, no open port. Two small `cloudflared` pods open the connection *outward* to Cloudflare, and Cloudflare passes Teams' requests down it.
 
-- Set `host` to W5 in **both** places.
-- Set `ingressClassName` to W6.
-- Set TLS:
-  - **NGINX + cert-manager:** set the `cert-manager.io/cluster-issuer` annotation to your ClusterIssuer (`kubectl get clusterissuer`). Keep the `tls:` section.
-  - **AWS ALB + ACM:** follow the comment in the file. Delete the cert-manager line and the `tls:` section, set `ingressClassName: alb`, and uncomment the `alb.ingress.kubernetes.io/`* annotations with your certificate ARN. Keep `healthcheck-path: /healthz`: the agent returns 404 on `/`, so without it the load balancer marks the pod unhealthy.
-
-To find the ACM certificate ARN:
-
-```bash
-aws acm list-certificates --region <W3> --query "CertificateSummaryList[].[DomainName,CertificateArn]" --output table
+```text
+Teams (Microsoft's cloud) ──HTTPS──▶ Cloudflare <W5>: firewall lets only POST /teams/webhook through
+   ──▶ tunnel, opened outward by 2 cloudflared pods (namespace kubesupport)
+   ──▶ Service kubesupport-teams ──▶ kubesupport pod port 8080 (serves only POST /teams/webhook)
+   ──▶ HMAC signature check ──▶ your tenant and allowed people only ──▶ answer
 ```
 
-### 8.2 Apply, then point DNS at it
+| Layer | What it stops |
+|---|---|
+| No load balancer, no public IP, no inbound port in AWS | Nobody on the internet can reach the cluster directly |
+| Cloudflare firewall and rate-limit rules (8.3) | Anything except `POST /teams/webhook` is blocked at Cloudflare; floods are cut off |
+| Port 8080 serves only `/teams/webhook` | Even if a Cloudflare setting is wrong, the internal API can't be reached through the tunnel |
+| NetworkPolicies (3.4) | Inside the cluster, only the tunnel pods can reach port 8080 |
+| HMAC signature (T3) | Only your Teams outgoing webhook can make kubesupport do anything |
+| Private team, `TEAMS_TENANT_ID`, `TEAMS_ALLOWED_USER_IDS` (8.5) | Only the people you choose can ask |
 
-```bash
-kubectl apply -f deploy/ingress.yaml
-kubectl -n kubesupport get ingress kubesupport     # wait for the ADDRESS column, then copy it
+> **Started the ALB setup earlier?** Remove it:
+>
+> - `kubectl -n kubesupport delete ingress kubesupport --ignore-not-found`;
+> - delete any existing DNS record for W5;
+> - the ACM certificate is no longer needed.
+
+### 8.1 Create the tunnel → C1
+
+1. Cloudflare dashboard → **Networking** → **Tunnels** → **Create a tunnel**. On older dashboards the path is **Zero Trust** → **Networks** → **Tunnels**; there, choose the **Cloudflared** type.
+2. Name it `kubesupport-<W2>` and create it.
+3. On the install screen, choose **Docker**. Copy **only the token**: the long string after `--token` in the command shown. Don't run the command. 📝 **C1**
+
+### 8.2 Route W5 to kubesupport
+
+In the tunnel, open the **Routes** tab (older dashboards: **Public Hostname**) → **Add route** → **Published application**.
+
+> Not **Private hostname** or **Private network**: those only work for devices running the Cloudflare One (WARP) client. Teams calls from Microsoft's cloud without it, so it would never reach kubesupport.
+
+Fill in:
+
+| Field | Value |
+|---|---|
+| Hostname | subdomain `kubesupport`, domain W6 (`appmco.xyz`), giving W5 |
+| Path (if the form shows it) | `^/teams/webhook$` |
+| Service | `http://kubesupport-teams.kubesupport.svc.cluster.local` |
+
+Save the route.
+
+- Cloudflare creates the DNS record for W5 itself: a proxied CNAME to `<tunnel-id>.cfargotunnel.com`.
+- If W5 already has a DNS record (for example from the ALB setup), delete it first, or the route can't be saved.
+
+### 8.3 Cloudflare firewall rules for W5
+
+In the Cloudflare dashboard, open the domain W6.
+
+**1. Only the Teams webhook gets through.** **Security** → **WAF** (newer dashboards: **Security rules**) → **Custom rules** → **Create rule**:
+
+- Name: `kubesupport: only POST /teams/webhook`;
+- **Edit expression**, and paste:
+
+```text
+(http.host eq "kubesupport.appmco.xyz" and not (http.request.method eq "POST" and http.request.uri.path eq "/teams/webhook"))
 ```
 
-In your DNS (Route 53 or other), create a **CNAME** (or Route 53 **alias**) from W5 to that address. Wait a few minutes, then:
+- Action: **Block** → **Deploy**.
+
+**2. Rate limit.** Same place → **Rate limiting rules** → **Create rule**:
+
+- Name `kubesupport: rate limit`; match `http.host eq "kubesupport.appmco.xyz"`;
+- counting by IP, more than **20** requests per **10 seconds** → **Block** for 10 seconds.
+
+**3. HTTPS.** **SSL/TLS** → **Edge Certificates**:
+
+- **Always Use HTTPS**: on;
+- **Minimum TLS Version**: `TLS 1.2`.
+
+Cloudflare's free Universal certificate covers W5, so you need no certificate in AWS.
+
+**Don't:**
+
+- put a **Cloudflare Access** application on W5: Teams can't sign in, so every question would be blocked;
+- allowlist your office or VPN IP addresses: Teams calls from Microsoft's cloud, not from your users' network.
+
+### 8.4 Store the token and start the tunnel
+
+kubesupport must run an image built from this version, which listens on port 8080. If CI pushed a new image since your last deploy:
 
 ```bash
-curl -i -X POST https://<W5>/teams/webhook
+kubectl apply -f deploy/deployment.yaml && kubectl -n kubesupport rollout restart deploy/kubesupport
 ```
 
-✅ **Check:** `401` (meaning "missing signature", which is good). A timeout, certificate error or 404 means DNS, TLS or the ingress isn't right yet.
+Then:
+
+```bash
+kubectl -n kubesupport create secret generic kubesupport-tunnel --from-literal=TUNNEL_TOKEN='<C1>'
+kubectl apply -f deploy/cloudflare-tunnel.yaml
+kubectl -n kubesupport rollout status deploy/kubesupport-tunnel
+```
+
+✅ **Check:** two `kubesupport-tunnel-…` pods are Running and Ready, and the tunnel shows **Healthy** in the Cloudflare dashboard.
+
+From your laptop:
+
+```bash
+curl -i -X POST https://<W5>/teams/webhook     # → 401: reached kubesupport, refused without a Teams signature
+curl -i https://<W5>/alerts/status             # → 403: blocked by Cloudflare (8.3)
+```
+
+✅ **Check:** `401`, then `403`. Anything else: see Troubleshooting.
+
+The outgoing webhook's **Callback URL** (Step 4.3) is exactly `https://<W5>/teams/webhook`.
+
+### 8.5 Only the people you choose → W7
+
+1. **Private team:** hold the questions channel (4.2) in a **private** team whose members are only the people allowed to ask. Only members of a team can @mention its outgoing webhook.
+2. **Your organization only:** Entra admin center (entra.microsoft.com) → **Overview** → copy the **Tenant ID**. 📝 **W7**
+3. **Named people only:** Entra admin center → **Users** → open each person → copy their **Object ID**.
+4. Put both in the ConfigMap in `deploy/deployment.yaml`:
+
+```yaml
+  TEAMS_TENANT_ID: "<W7>"
+  TEAMS_ALLOWED_USER_IDS: "<object-id-1>,<object-id-2>"
+```
+
+```bash
+kubectl apply -f deploy/deployment.yaml && kubectl -n kubesupport rollout restart deploy/kubesupport
+```
+
+✅ **Check:** someone not on the list who @mentions kubesupport gets *"you're not on this agent's allowed-users list"*, and nothing is run.
 
 ---
 
@@ -511,7 +635,9 @@ kubectl -n $NS delete deployment crash-test
 | **Change a secret** (new key, new Workflows URL) | Re-run the Step 5 `create secret` command with `--dry-run=client -o yaml \| kubectl apply -f -` on the end, then `kubectl -n kubesupport rollout restart deploy/kubesupport` |
 | **Pause alerts** | `WATCH_ENABLED: "false"` in the ConfigMap, apply, restart |
 | **See what it sees** | `/alerts/status`, `/activity/status`, `/activity` (Step 9.1 port-forward), `@kubesupport activity` in Teams, or `kubectl -n kubesupport logs deploy/kubesupport -f` |
-| **Uninstall** | `kubectl delete validatingwebhookconfiguration kubesupport-activity` **first** (it's cluster-wide), then `kubectl delete -f deploy/ingress.yaml -f deploy/deployment.yaml` (this also deletes the namespace and the Secrets). Finally remove the outgoing webhook and the workflows in Teams. |
+| **Uninstall** | `kubectl delete validatingwebhookconfiguration kubesupport-activity` **first** (it's cluster-wide), then `kubectl delete -f deploy/cloudflare-tunnel.yaml -f deploy/deployment.yaml` (this also deletes the namespace and the Secrets). Finally delete the tunnel in Cloudflare (its DNS record goes with it), and remove the outgoing webhook and the workflows in Teams. |
+| **Update cloudflared** | Change the image tag in `deploy/cloudflare-tunnel.yaml` to a newer release (Docker Hub `cloudflare/cloudflared` tags), then `kubectl apply -f deploy/cloudflare-tunnel.yaml`. The two pods are replaced one at a time, so questions keep working. |
+| **Tunnel token leaked** | Delete the tunnel in Cloudflare, then redo 8.1, 8.2 and 8.4 with a new tunnel: recreate the Secret with `--dry-run=client -o yaml \| kubectl apply -f -` and `kubectl -n kubesupport rollout restart deploy/kubesupport-tunnel` |
 
 ---
 
@@ -533,9 +659,14 @@ kubectl -n $NS delete deployment crash-test
 | One target fails in `/alerts/test` (e.g. `oncall-private`) | That workflow is off or deleted, or it can't post there. If its run history shows *BotNotInConversationRoster*, set **Post as** to **User** (Step 4.4). |
 | Private channel not offered in the Workflows template | Create the workflow for any channel, then switch the channel in Power Automate (Step 4.4) |
 | Some alerts missing during a burst | Teams throttles more than 4 posts per second per webhook. The agent retries 3 times; look for `Teams target '…' returned 429` in the agent log. |
-| `curl https://<W5>/teams/webhook` times out | DNS not pointing at the ingress yet, or the load balancer is internal-only (Step 3.4) |
-| Certificate error | cert-manager hasn't issued yet (`kubectl -n kubesupport get certificate`), or the ACM certificate doesn't cover W5 |
-| `404` instead of `401` | `TEAMS_OUTGOING_WEBHOOK_SECRET` not in the Secret, or the pod not restarted after adding it; or `host` in `ingress.yaml` ≠ W5 |
+| Tunnel pods `CreateContainerConfigError` | Secret `kubesupport-tunnel` is missing or has no `TUNNEL_TOKEN` key (8.4) |
+| Tunnel pods restart or stay not Ready | `kubectl -n kubesupport logs deploy/kubesupport-tunnel`. An authentication error means a wrong token: recreate the Secret with C1. Connection errors mean outbound TCP and UDP port 7844 to Cloudflare is blocked (Step 3.5). |
+| Cloudflare error **1033** | The tunnel isn't connected: no tunnel pod is running (see the two rows above) |
+| `502 Bad Gateway` from Cloudflare | The tunnel is up but can't reach kubesupport. Check: the route's Service is `http://kubesupport-teams.kubesupport.svc.cluster.local` (8.2); the kubesupport pod runs the new image with port 8080 (8.4); the tunnel pods carry the label `app.kubernetes.io/name: kubesupport-tunnel`, which the NetworkPolicy allows |
+| `403` on `POST /teams/webhook`, or Teams says "Sorry, there was a problem…" | Cloudflare blocked it: **Security** → **Events** shows which rule. Check the WAF expression (8.3). **Bot Fight Mode** on the domain can also block Teams' calls; switch it off for the domain if Events shows it. |
+| `curl https://<W5>/…` can't resolve the name | The route wasn't saved, so there is no DNS record (8.2); `nslookup <W5>` should return Cloudflare addresses |
+| `404` instead of `401` | `TEAMS_OUTGOING_WEBHOOK_SECRET` isn't in the Secret, or the pod wasn't restarted after adding it; or the route's Path doesn't match `/teams/webhook` (8.2) |
+| A teammate gets "not on this agent's allowed-users list" | Add their Entra Object ID to `TEAMS_ALLOWED_USER_IDS` (8.5), apply, restart |
 | Teams says "Sorry, there was a problem…" after `@kubesupport` | Wrong token (agent log: `Rejected /teams/webhook call`), or the URL isn't reachable |
 | "Looking into it…" but no answer card | `TEAMS_REPLY_WEBHOOK_URL` wrong, or that workflow is off (agent log: `Teams webhook … returned …`) |
 | "namespace … not allowed" | Add it to `ALLOWED_NAMESPACES` (or set it to `"*"`) |
@@ -551,11 +682,11 @@ kubectl -n $NS delete deployment crash-test
 - [ ] 0  Worksheet W1–W8 filled in
 - [ ] 1  Git, AWS CLI, kubectl installed; `aws sts get-caller-identity` works
 - [ ] 2  Docker Hub repo `kubesupport` (public) + token; GitHub variable/secret set; pushed; CI green; image on Docker Hub
-- [ ] 3  `kubectl get nodes` works; can create cluster roles; `pull-check` printed `pull ok`; ingress class known
+- [ ] 3  `kubectl get nodes` works; can create cluster roles; `pull-check` printed `pull ok`; network policies enforced (3.4)
 - [ ] 4  Teams: T1 (alerts chat), T2 (answers channel), T3 (outgoing webhook token)
 - [ ] 5  Namespace `kubesupport` + Secret `kubesupport-secrets` created
 - [ ] 6  `deployment.yaml` edited: image, CLUSTER_NAME (ALLOWED_NAMESPACES optional)
 - [ ] 7  Applied; pod Running; "kubesupport started" card; `kubectl auth can-i` checks as expected
 - [ ] 7b `bash deploy/webhook-cert.sh` run; `/activity/status` shows the certificate; test Service produced a "Cluster activity" card
-- [ ] 8  `ingress.yaml` edited and applied; DNS record; `curl -X POST` returns 401
+- [ ] 8  Tunnel created (C1); route W5 → `kubesupport-teams`; WAF and rate-limit rules; Secret `kubesupport-tunnel`; tunnel pods Ready; `curl` gives 401 and 403; private team; `TEAMS_TENANT_ID` and `TEAMS_ALLOWED_USER_IDS` set
 - [ ] 9  Test card received; `@kubesupport help` answered; crash test alerted and resolved

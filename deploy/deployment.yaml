@@ -139,8 +139,8 @@ data:
   ACTIVITY_BATCH_SECONDS: "60"     # activity is grouped into one Teams card per this many seconds
   ACTIVITY_IGNORE_USERS: "system:node:,system:kube-,system:apiserver,system:serviceaccount:kube-system:,eks:,system:serviceaccount:kubesupport:"  # callers whose actions are not reported (prefixes)
   ACTIVITY_IGNORE_NAMESPACES: "kube-node-lease"  # namespaces whose activity is not reported
-  TEAMS_TENANT_ID: ""              # optional: only answer Teams messages from this Entra tenant
-  TEAMS_ALLOWED_USER_IDS: ""       # optional: comma-separated Entra object IDs allowed to ask
+  TEAMS_TENANT_ID: ""              # recommended: only answer Teams messages from your Microsoft 365 tenant (Step 8.5)
+  TEAMS_ALLOWED_USER_IDS: ""       # recommended: comma-separated Entra object IDs of the people allowed to ask (Step 8.5)
   REPORT_DIR: "/tmp/reports"
 ---
 apiVersion: apps/v1
@@ -172,11 +172,13 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: docker.io/<dockerhub-user>/kubesupport:latest   # EDIT: your Docker Hub user/org (or pin a sha-xxxxxxx tag)
+          image: docker.io/jayachandra261020/kubesupport:latest   # EDIT: your Docker Hub user/org (or pin a sha-xxxxxxx tag)
           imagePullPolicy: Always
           ports:
-            - name: http
+            - name: http             # internal API and health checks (never exposed)
               containerPort: 8000
+            - name: teams            # POST /teams/webhook only; reached only through the Cloudflare Tunnel
+              containerPort: 8080
             - name: webhook          # activity webhook (HTTPS), called by the Kubernetes API server
               containerPort: 8443
           envFrom:
@@ -237,3 +239,50 @@ spec:
     - name: http
       port: 80
       targetPort: http
+---
+# Target of the Cloudflare Tunnel route (deploy/cloudflare-tunnel.yaml): POST /teams/webhook only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubesupport-teams
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kubesupport
+  ports:
+    - name: teams
+      port: 80
+      targetPort: teams
+---
+# ── NETWORK POLICY: who may connect to the kubesupport pod ─────────────────────
+# Enforced when the cluster runs a network-policy engine (on EKS: the VPC CNI with network
+# policy turned on; Configuration.md, Step 3.4). Without one it is simply ignored.
+#   8080 (Teams webhook)      only from the Cloudflare Tunnel pods
+#   8443 (activity webhook)   from the Kubernetes API server (EKS control plane)
+#   8000 (internal API)       from no pod at all; kubectl port-forward and health checks still work
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesupport
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubesupport
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kubesupport-tunnel
+      ports:
+        - protocol: TCP
+          port: 8080
+    - ports:
+        - protocol: TCP
+          port: 8443

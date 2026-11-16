@@ -45,17 +45,18 @@ kubesupport runs as **one pod inside your EKS cluster**:
  └────────────────────────────────────────┼─────────────────────┼─┼─────┘
      outgoing webhook (HMAC-signed POST)   │   Workflows webhooks (HTTPS POST, outbound)
                                            ▼                     │ │
- your ingress controller ── only /teams/webhook                  │ │
-                                           │                     │ │
+ Cloudflare: WAF allows only POST /teams/webhook                 │ │
+                                           │ via tunnel          │ │
  ┌──────────── EKS cluster ── namespace kubesupport ─────────────┼─┼─────┐
+ │  cloudflared ×2 (no inbound) ──▶ kubesupport :8080 only        │ │     │
  │  kubesupport pod (1 replica, Python 3.12)                      │ │     │
- │   ├─ :8000 /teams/webhook  verify HMAC → command or question ──┘ │     │
+ │   ├─ :8080 /teams/webhook  verify HMAC → command or question ──┘ │     │
  │   ├─ watcher: every 60 s detect → RCA → alert card ──────────────┤     │
  │   ├─ :8443 /admission ◀── Kubernetes API server (webhook):       │     │
  │   │     exec, creates, deletes, RBAC, updates, with WHO;          │     │
  │   │     always "allowed" → one activity card per minute ──────────┘     │
  │   ├─ AI tool-use loop (Groq or Claude) or rule-based diagnosis         │
- │   ├─ internal API (ClusterIP): /rca /chat /alerts/* /activity*         │
+ │   ├─ :8000 internal API (no pod may connect): /rca /chat /alerts/*     │
  │   └─ read-only RBAC ("view" + cluster-read) ──▶ Kubernetes API:        │
  │        every object in every namespace, never Secrets                  │
  └────────────────────────────────────────────────────────────────────────┘
@@ -64,7 +65,7 @@ kubesupport runs as **one pod inside your EKS cluster**:
 
 **Alert flow:** watcher finds a new incident → RCA → Adaptive Card → POST to your Workflows webhook(s) → card appears in Teams.
 
-**Question flow:** you @mention the agent in a channel → Teams POSTs the message to `https://<your host>/teams/webhook`, signed with HMAC → the agent checks the signature →
+**Question flow:** you @mention the agent in a channel → Teams POSTs the message to `https://<your host>/teams/webhook`, signed with HMAC → Cloudflare lets only this request through and passes it down the tunnel to port 8080 → the agent checks the signature →
 - **quick commands** (`status`, `pods`, `events`, `logs`) are answered in the same thread within Teams' 5-second limit;
 - **slow work** (AI questions, `rca`) gets "Looking into it…" right away, and the full answer arrives a little later as a card in the channel, through the channel's Workflows webhook.
 
@@ -74,6 +75,7 @@ kubesupport runs as **one pod inside your EKS cluster**:
 - Teams bots need **Azure Bot Service**, which isn't available here.
 - An **Entra app on its own can't post ordinary Teams messages**: Microsoft Graph only allows app-only sending for migrations.
 - Teams' own **Workflows webhooks** (for posting) and **outgoing webhooks** (for questions) need neither, and are set up with a few clicks.
+- **Cloudflare Tunnel instead of a load balancer:** the cluster opens the connection outward, so nothing in AWS accepts connections from the internet.
 
 ---
 
@@ -82,8 +84,8 @@ kubesupport runs as **one pod inside your EKS cluster**:
 ```text
 Agent-kube/
 ├── agent/                          The agent (Python 3.12)
-│   ├── main.py                     Entrypoint: API on :8000, activity webhook on :8443 (HTTPS)
-│   ├── app.py                      FastAPI: /teams/webhook + internal API; starts the watcher and activity feed
+│   ├── main.py                     Entrypoint: API :8000, Teams webhook :8080, activity webhook :8443 (HTTPS)
+│   ├── app.py                      FastAPI: internal API + teams_app (/teams/webhook only); starts watcher and activity feed
 │   ├── activity.py                 Activity webhook: who exec'd/created/deleted/changed what → one card per minute
 │   ├── watcher.py                  Incident loop: new → RCA → alert; reminders; resolved; startup summary
 │   ├── tools.py                    Read-only Kubernetes tools (incl. any kind of object) + detect_incidents()
@@ -96,10 +98,10 @@ Agent-kube/
 │   ├── runbooks/                   Short notes the AI model can search
 │   ├── tests/                      pytest suite (no cluster, AI model or Teams needed)
 │   ├── Dockerfile, requirements*.txt
-├── deploy/deployment.yaml          Install with kubectl: namespace, cluster-wide read-only RBAC, settings, Deployment, Service
+├── deploy/deployment.yaml          Install with kubectl: namespace, read-only RBAC, settings, Deployment, Services, NetworkPolicy
 ├── deploy/activity-webhook.yaml    Activity webhook (Service + ValidatingWebhookConfiguration); applied by webhook-cert.sh
 ├── deploy/webhook-cert.sh          Creates the webhook's certificate, applies activity-webhook.yaml, restarts kubesupport
-├── deploy/ingress.yaml             Optional: exposes only /teams/webhook, for questions from Teams
+├── deploy/cloudflare-tunnel.yaml   Optional: Cloudflare Tunnel (2 × cloudflared) for /teams/webhook; nothing exposed in AWS
 ├── .github/workflows/ci.yml        Lint + tests (incl. manifest checks); on main: build & push the image to Docker Hub
 ├── Configuration.md                Step-by-step install and configuration
 └── docs/IMPLEMENTATION_GUIDE.md    This guide
@@ -175,7 +177,7 @@ Every RCA carries `generated_by` (`llm:<provider>:<model>`, e.g. `llm:groq:opena
 2. The request carries an `Authorization: HMAC …` header, computed with the webhook's security token; the agent rejects anything without a valid signature.
 3. Teams waits **5 seconds** for the reply. [`teams.py`](../agent/teams.py) answers quick commands within 4 seconds. For slow work it replies "Looking into it…" and posts the answer later through `TEAMS_REPLY_WEBHOOK_URL`.
 
-Optional extra checks: `TEAMS_TENANT_ID` (only your organization) and `TEAMS_ALLOWED_USER_IDS` (only these people, by Entra object ID).
+Recommended extra checks: `TEAMS_TENANT_ID` (only your organization) and `TEAMS_ALLOWED_USER_IDS` (only these people, by Entra object ID).
 
 ### 4.4 Safety model
 
@@ -186,7 +188,8 @@ Optional extra checks: `TEAMS_TENANT_ID` (only your organization) and `TEAMS_ALL
 | Redaction | Passwords, tokens, API keys, AWS access keys and JWTs in logs and in object listings (e.g. ConfigMap values) are replaced by `[REDACTED]` before the AI model or Teams sees them. |
 | Prompt-injection guard | All tool output reaches the AI model wrapped in `<untrusted_data>`, with instructions never to follow text inside it. |
 | Data sent to the AI provider | With a key set, the question and the (redacted) tool output, such as pod lists, events, log lines and object listings, go to that provider (Groq or Anthropic) over HTTPS. Without a key, nothing leaves the cluster except Teams cards. |
-| Public exposure | Only `/teams/webhook` is exposed (Ingress path `Exact`), and every call needs a valid HMAC. Everything else is ClusterIP. |
+| Public exposure | Nothing in AWS accepts connections from the internet: no load balancer, no public IP, no open port. Teams' requests reach kubesupport only through a Cloudflare Tunnel that the cluster opens outward. Cloudflare blocks everything except `POST /teams/webhook` and rate-limits it. The tunnel reaches port 8080, which serves only that path, and every call needs a valid HMAC. All Services are ClusterIP. |
+| Network policies | Only the tunnel pods may connect to port 8080; no pod may connect to the internal API (8000); nothing may connect to the tunnel pods. Enforced when the cluster's network-policy engine is on (EKS VPC CNI network policy, Calico, Cilium). |
 | Internal API | `/rca`, `/chat`, `/alerts/*` require `x-api-key` when `AGENT_API_KEY` is set. |
 | Activity webhook | Always answers "allowed". `failurePolicy: Ignore` and a 3 s timeout mean no API request is ever blocked or noticeably slowed, even when kubesupport is down. HTTPS with its own CA. For Secrets and ConfigMaps only the name is kept. |
 | Container | Non-root (UID 10001), read-only root filesystem, no privilege escalation, all capabilities dropped. |
@@ -227,7 +230,7 @@ The full checklist, with every command and a check after each step, is in [Confi
 3. **Secret** `kubesupport-secrets` in namespace `kubesupport`, with the keys `GROQ_API_KEY` (or `ANTHROPIC_API_KEY`), `AGENT_API_KEY`, `TEAMS_ALERT_WEBHOOK_URLS`, `TEAMS_REPLY_WEBHOOK_URL` and `TEAMS_OUTGOING_WEBHOOK_SECRET` (all optional).
 4. **Edit [`deploy/deployment.yaml`](../deploy/deployment.yaml):** the image and `CLUSTER_NAME` (optionally `ALLOWED_NAMESPACES`). Then `kubectl apply -f deploy/deployment.yaml`.
 5. **Activity notices:** `bash deploy/webhook-cert.sh`.
-6. **Questions from Teams:** edit and apply [`deploy/ingress.yaml`](../deploy/ingress.yaml), which exposes only `/teams/webhook`, and point DNS at it.
+6. **Questions from Teams:** in Cloudflare, create a tunnel with a route from your hostname to `http://kubesupport-teams.kubesupport.svc.cluster.local`, and add the firewall rules. Store the tunnel token in Secret `kubesupport-tunnel`, then apply [`deploy/cloudflare-tunnel.yaml`](../deploy/cloudflare-tunnel.yaml).
 7. **Test:**
    - `POST /alerts/test` through a port-forward;
    - `@kubesupport help` in the channel;
@@ -243,10 +246,14 @@ The full checklist, with every command and a check after each step, is in [Confi
 | ClusterRoleBinding `kubesupport-view` → built-in `view` | Read every namespaced object in every namespace (never Secrets) |
 | ClusterRole + ClusterRoleBinding `kubesupport-cluster-read` | Read nodes, namespaces, volumes, storage classes, CRDs, RBAC, webhook configurations, metrics |
 | ConfigMap `kubesupport-config` | Plain settings ([section 7](#7-configuration-reference)) |
-| Deployment `kubesupport` | One pod, `Recreate` strategy, non-root, read-only filesystem; ports 8000 (API) and 8443 (activity webhook); settings from the ConfigMap and the Secret; the webhook certificate is mounted when present |
-| Service `kubesupport` | ClusterIP, port 80 → 8000 (internal API; the Ingress points here) |
+| Deployment `kubesupport` | One pod, `Recreate` strategy, non-root, read-only filesystem; ports 8000 (internal API), 8080 (Teams webhook only) and 8443 (activity webhook); settings from the ConfigMap and the Secret; the webhook certificate is mounted when present |
+| Service `kubesupport` | ClusterIP, port 80 → 8000 (internal API; reach it with `kubectl port-forward`) |
+| Service `kubesupport-teams` | ClusterIP, port 80 → 8080: the Cloudflare Tunnel's target, `POST /teams/webhook` only |
+| NetworkPolicy `kubesupport` | Port 8080 only from the tunnel pods; 8443 from the API server; 8000 from no pod |
 
 `deploy/activity-webhook.yaml` (applied by `webhook-cert.sh`) adds Service `kubesupport-webhook` (443 → 8443) and the cluster-wide ValidatingWebhookConfiguration `kubesupport-activity`.
+
+`deploy/cloudflare-tunnel.yaml` adds Deployment `kubesupport-tunnel`: two `cloudflared` pods, pinned version, non-root, read-only filesystem, no Kubernetes API access. The token comes from Secret `kubesupport-tunnel`. It also adds a PodDisruptionBudget, and a NetworkPolicy that lets nothing connect to the tunnel pods. The tunnel's route and firewall rules live in the Cloudflare dashboard (Configuration.md, Step 8).
 
 ---
 
@@ -321,11 +328,11 @@ Plain settings live in the ConfigMap `kubesupport-config` in [`deploy/deployment
 | `ACTIVITY_IGNORE_USERS` | ConfigMap | Kubernetes/EKS components + kubesupport | Comma-separated caller prefixes whose actions aren't reported |
 | `ACTIVITY_IGNORE_NAMESPACES` | ConfigMap | `kube-node-lease` | Namespaces whose activity isn't reported |
 | `TEAMS_ACTIVITY_WEBHOOK_URLS` | Secret (optional) | the alert targets | Send activity cards somewhere other than the alerts |
-| `TEAMS_TENANT_ID` | ConfigMap | `""` | Only accept questions from this tenant |
-| `TEAMS_ALLOWED_USER_IDS` | ConfigMap | `""` | Only accept questions from these Entra object IDs |
+| `TEAMS_TENANT_ID` | ConfigMap | `""` | Only accept questions from this tenant (recommended) |
+| `TEAMS_ALLOWED_USER_IDS` | ConfigMap | `""` | Only accept questions from these Entra object IDs (recommended) |
 | `REPORT_DIR` | ConfigMap | `/tmp/reports` | Where HTML reports are written |
 
-The image, permissions and resources are set directly in [`deploy/deployment.yaml`](../deploy/deployment.yaml); the Ingress is in [`deploy/ingress.yaml`](../deploy/ingress.yaml).
+The image, permissions and resources are set directly in [`deploy/deployment.yaml`](../deploy/deployment.yaml); the Cloudflare Tunnel is in [`deploy/cloudflare-tunnel.yaml`](../deploy/cloudflare-tunnel.yaml), and its route and firewall rules are in the Cloudflare dashboard.
 
 ---
 
@@ -395,6 +402,7 @@ To try the outgoing webhook locally, expose port 8000 with a tunnel (for example
 | 10 | **Secret objects reach the webhook** | The API server sends the whole object; kubesupport keeps only the name. Remove `secrets` from the webhook rules if that's not acceptable. |
 | 11 | **Groq free plan** | Per-minute and per-day token limits make AI answers and RCAs slow (minutes), and they stop for the day once the daily limit is used up; alerts then carry rule-based RCAs. Requests are kept small, so the model sees shortened tool output. |
 | 12 | **Open models are less predictable** | Groq's models sometimes skip a tool or return an incomplete RCA. kubesupport reminds the model to call `submit_rca`, then requires it, checks the result, and falls back to the rules if it is still unusable. Claude gives the most thorough RCAs. |
+| 13 | **Cloudflare is in the path of questions** | Questions from Teams depend on Cloudflare and the tunnel pods; alerts and activity notices don't, because they go straight from the pod to Teams. Cloudflare terminates HTTPS, so it handles the text of the questions and quick answers. |
 
 ---
 
@@ -405,6 +413,7 @@ To try the outgoing webhook locally, expose port 8000 with a tunnel (for example
   - **Anthropic:** billed per token, only when a key is set. An RCA can take up to 14 model calls; `claude-opus-5-5` costs $4 / $20 per million input/output tokens (at the time of writing);
   - alerts are capped by `MAX_LLM_RCA_PER_HOUR`; questions from Teams are not capped;
   - lower `AGENT_EFFORT` or pick a cheaper `AGENT_MODEL` to spend less.
+- **Cloudflare:** Tunnel, the WAF custom rule, one rate-limiting rule and the Universal certificate are included in Cloudflare's free plan.
 - **Infrastructure:** nothing extra. The image is on Docker Hub (free for public repositories), and the agent runs on your existing nodes (50m CPU / 128Mi requested).
 - **Teams:** Workflows webhooks and outgoing webhooks need no premium licence.
 
@@ -417,6 +426,8 @@ To try the outgoing webhook locally, expose port 8000 with a tunnel (for example
 | **RCA** | Root cause analysis: what broke, why, the evidence, how to fix and prevent it |
 | **SEV1–SEV4** | Severity, SEV1 most severe; sets the alert card colour |
 | **Incident** | One problem on one workload, e.g. `payments/Deployment/api/CrashLoop`; several failing pods of the same Deployment are one incident |
+| **Cloudflare Tunnel** | An outbound-only connection from `cloudflared` pods in your cluster to Cloudflare; Cloudflare sends requests for your hostname down it, so the cluster needs no public endpoint |
+| **NetworkPolicy** | Kubernetes firewall rules between pods; enforced by the cluster's network-policy engine |
 | **Workflows webhook** | A URL from the Teams Workflows app; whatever is POSTed to it appears as a card in a chosen chat or channel |
 | **Outgoing webhook** | A Teams feature: @mentioning it in a channel sends the message to your HTTPS endpoint, which must reply within 5 s |
 | **HMAC** | The signature Teams adds to outgoing-webhook requests, so the agent can tell they really came from your webhook |

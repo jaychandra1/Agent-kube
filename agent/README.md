@@ -4,8 +4,8 @@ The Python app that runs in the cluster. Full documentation: [docs/IMPLEMENTATIO
 
 | File | What it does |
 |---|---|
-| `main.py` | Entrypoint (`python main.py`): the API on :8000 and, with a mounted certificate, the activity webhook on :8443 |
-| `app.py` | FastAPI app: `/teams/webhook` (Teams outgoing webhook) plus the internal API; starts the watcher and the activity feed |
+| `main.py` | Entrypoint (`python main.py`): the internal API on :8000, the Teams webhook alone on :8080 (the Cloudflare Tunnel's target) and, with a mounted certificate, the activity webhook on :8443 |
+| `app.py` | FastAPI apps: the internal API (`app`), and `teams_app`, which serves only `/teams/webhook`; starts the watcher and the activity feed |
 | `activity.py` | Activity webhook: turns API-server admission requests into "who did what" events; one Teams card per minute |
 | `watcher.py` | Every minute: find incidents, run an RCA for new ones, post Teams alerts, post "resolved" notices |
 | `tools.py` | Read-only Kubernetes tools, including any kind of object (`list_resources`, `get_resource`); namespace allowlist, redaction, `detect_incidents()` |

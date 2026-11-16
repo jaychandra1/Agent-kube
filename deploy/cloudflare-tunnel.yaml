@@ -1,0 +1,118 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# OPTIONAL: only needed to ask kubesupport questions from a Teams channel.
+# Alerts and activity notices work without it.
+#
+# Cloudflare Tunnel. Two cloudflared pods open connections OUT to Cloudflare. Cloudflare
+# sends https://<your hostname>/teams/webhook down those connections to the
+# kubesupport-teams Service (port 8080 of the kubesupport pod, which serves
+# POST /teams/webhook and nothing else). Nothing in AWS accepts connections from the
+# internet: no load balancer, no public IP, no open port.
+#
+# Before applying (Configuration.md, Step 8):
+#   1. create the tunnel and its route in the Cloudflare dashboard,
+#   2. store the tunnel token in the cluster:
+#      kubectl -n kubesupport create secret generic kubesupport-tunnel --from-literal=TUNNEL_TOKEN='<token>'
+# Then: kubectl apply -f deploy/cloudflare-tunnel.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesupport-tunnel
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport-tunnel
+spec:
+  replicas: 2                      # two connectors: no gap during restarts, node drains or token rotation
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubesupport-tunnel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubesupport-tunnel
+    spec:
+      automountServiceAccountToken: false   # cloudflared never talks to the Kubernetes API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:       # prefer the two pods on different nodes
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: kubesupport-tunnel
+      containers:
+        - name: cloudflared
+          image: docker.io/cloudflare/cloudflared:2026.10.7   # pinned; update on purpose (Configuration.md, Step 10)
+          args:                        # order matters: "run" comes last
+            - tunnel
+            - --no-autoupdate
+            - --loglevel
+            - info
+            - --metrics
+            - 0.0.0.0:2000
+            - run
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kubesupport-tunnel
+                  key: TUNNEL_TOKEN
+          ports:
+            - name: metrics
+              containerPort: 2000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:              # /ready is 200 only while connected to Cloudflare
+            httpGet:
+              path: /ready
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+# Keep at least one connector running during node drains and cluster upgrades.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kubesupport-tunnel
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport-tunnel
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubesupport-tunnel
+---
+# Nothing may connect to the tunnel pods; they only connect out (health checks still work).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesupport-tunnel
+  namespace: kubesupport
+  labels:
+    app.kubernetes.io/name: kubesupport-tunnel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubesupport-tunnel
+  policyTypes: ["Ingress"]

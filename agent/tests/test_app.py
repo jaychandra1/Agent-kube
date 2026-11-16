@@ -45,3 +45,16 @@ def test_alerts_status_and_api_key(client, monkeypatch):
     status = client.get("/alerts/status", headers={"x-api-key": "k"}).json()
     assert status["teams"] == {"alert_targets": ["alert-1"], "reply_webhook": "reply-1", "outgoing_webhook": True}
     assert status["watcher"]["running"] is False  # WATCH_ENABLED=false in tests
+
+
+def test_public_port_serves_only_the_teams_webhook():
+    """Port 8080 is what the Cloudflare Tunnel reaches: nothing but POST /teams/webhook."""
+    with TestClient(app_module.teams_app) as public:
+        body = json.dumps({"type": "message", "id": "pub-1", "text": "<at>kubesupport</at> help"}).encode()
+        assert public.post("/teams/webhook", content=body).status_code == 401
+        assert public.post("/teams/webhook", content=body, headers={"Authorization": sign(body)}).status_code == 200
+        for path in ("/healthz", "/alerts/status", "/activity", "/rca/latest", "/docs", "/openapi.json"):
+            assert public.get(path).status_code == 404, path
+        assert public.post("/rca", json={}).status_code == 404
+        assert public.post("/chat", json={"message": "hi"}).status_code == 404
+        assert public.get("/teams/webhook").status_code == 405

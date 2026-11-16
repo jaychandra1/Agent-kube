@@ -9,14 +9,14 @@
 - **Reports cluster activity:** once a minute, *who* exec'd into a pod, created or deleted a service or app, changed permissions, or changed an image or replica count.
 - **Answers questions in a Teams channel:** `@kubesupport status`, `@kubesupport get services payments`, `@kubesupport activity`, or any question in plain words.
 
-Teams is wired up with configuration only (Workflows webhooks and an outgoing webhook). There is no Azure Bot Service, no Entra app registration and no Teams app package.
+Teams is wired up with configuration only (Workflows webhooks and an outgoing webhook). There is no Azure Bot Service, no Entra app registration and no Teams app package. Nothing in AWS is exposed to the internet: questions from Teams arrive through a Cloudflare Tunnel that the cluster opens outward.
 
 | | |
 |---|---|
 | **Step-by-step install and configuration (start here)** | [Configuration.md](Configuration.md) |
 | Full guide (architecture, setup, usage, troubleshooting) | [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) |
 | Agent code | [agent/](agent) |
-| Install files (`kubectl apply`) | [deploy/deployment.yaml](deploy/deployment.yaml), [deploy/ingress.yaml](deploy/ingress.yaml) |
+| Install files (`kubectl apply`) | [deploy/deployment.yaml](deploy/deployment.yaml), [deploy/cloudflare-tunnel.yaml](deploy/cloudflare-tunnel.yaml) |
 | Activity notices setup | [deploy/webhook-cert.sh](deploy/webhook-cert.sh) (applies [deploy/activity-webhook.yaml](deploy/activity-webhook.yaml)) |
 | CI (tests, public image build and push to Docker Hub) | [.github/workflows/ci.yml](.github/workflows/ci.yml) |
 
@@ -27,5 +27,5 @@ Teams is wired up with configuration only (Workflows webhooks and an outgoing we
 - the Secret;
 - editing and applying `deploy/deployment.yaml`;
 - activity notices;
-- the optional Ingress;
+- the optional Cloudflare Tunnel for questions from Teams;
 - an end-to-end test.

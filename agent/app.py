@@ -1,10 +1,12 @@
 """kubesupport HTTP API.
 
-Public (through the Ingress):   POST /teams/webhook   - Teams outgoing webhook (HMAC-signed)
-Internal (ClusterIP only):      /healthz /ready /chat /rca /rca/latest /alerts/status /alerts/test
-                                /activity /activity/status
-The activity webhook itself (called by the Kubernetes API server) is a separate HTTPS app
-on port 8443, in activity.py; main.py starts both.
+`app` (port 8000, internal only):  /healthz /ready /chat /rca /rca/latest /alerts/status /alerts/test
+                                   /activity /activity/status, and /teams/webhook for local testing
+`teams_app` (port 8080, the only one the Cloudflare Tunnel reaches): POST /teams/webhook and
+                                   nothing else, not even /docs, so a mistake in the Cloudflare
+                                   settings can never expose the internal API
+The activity webhook (called by the Kubernetes API server) is a separate HTTPS app on port
+8443, in activity.py. main.py starts all three.
 """
 import hmac
 import logging
@@ -80,6 +82,10 @@ def ready():
     return {"status": "ready", "service": "kubesupport"}
 
 
+teams_app = FastAPI(title="kubesupport Teams webhook", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@teams_app.post("/teams/webhook")
 @app.post("/teams/webhook")
 async def teams_webhook(request: Request, authorization: str = Header(None)):
     """Teams outgoing webhook. The reply must come back within 5 seconds."""

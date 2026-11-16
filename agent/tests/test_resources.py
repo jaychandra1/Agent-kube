@@ -131,14 +131,14 @@ def test_teams_activity_command(monkeypatch):
 
 def test_main_starts_webhook_only_with_a_certificate(monkeypatch, tmp_path):
     monkeypatch.setattr(activity, "TLS_DIR", str(tmp_path))
-    api, webhook = main.build_configs()
-    assert api.port == 8000 and webhook is None
+    api, public, webhook = main.build_configs()
+    assert api.port == 8000 and public.port == 8080 and webhook is None
     (tmp_path / "tls.crt").write_text("cert")
     (tmp_path / "tls.key").write_text("key")
-    api, webhook = main.build_configs()
+    api, public, webhook = main.build_configs()
     assert webhook.port == 8443 and webhook.ssl_certfile == str(tmp_path / "tls.crt")
     monkeypatch.setattr(activity, "ENABLED", False)
-    assert main.build_configs()[1] is None
+    assert main.build_configs()[2] is None
 
 
 def test_tools_offered_to_the_model_include_generic_reads():

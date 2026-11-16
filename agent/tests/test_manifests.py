@@ -28,6 +28,7 @@ def settings_read_by_code() -> set:
 
 DOCS = load("deployment.yaml")
 WEBHOOK_DOCS = load("activity-webhook.yaml")
+TUNNEL_DOCS = load("cloudflare-tunnel.yaml")
 SECRET_KEYS = {"GROQ_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY", "AGENT_API_KEY", "TEAMS_ALERT_WEBHOOK_URLS",
                "TEAMS_REPLY_WEBHOOK_URL", "TEAMS_OUTGOING_WEBHOOK_SECRET"}
 
@@ -35,8 +36,9 @@ SECRET_KEYS = {"GROQ_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY", "AGENT_API_KE
 def test_all_objects_present_and_named_kubesupport():
     kinds = sorted(d["kind"] for d in DOCS)
     assert kinds == sorted(["Namespace", "ServiceAccount", "ClusterRoleBinding", "ClusterRole",
-                            "ClusterRoleBinding", "ConfigMap", "Deployment", "Service"])
-    for d in DOCS + WEBHOOK_DOCS:
+                            "ClusterRoleBinding", "ConfigMap", "Deployment", "Service", "Service",
+                            "NetworkPolicy"])
+    for d in DOCS + WEBHOOK_DOCS + TUNNEL_DOCS:
         assert d["metadata"]["name"].startswith("kubesupport"), d["metadata"]["name"]
         if d["kind"] not in ("Namespace", "ClusterRole", "ClusterRoleBinding", "ValidatingWebhookConfiguration"):
             assert d["metadata"]["namespace"] == "kubesupport", d["kind"]
@@ -77,7 +79,7 @@ def test_deployment():
     assert spec["selector"]["matchLabels"].items() <= spec["template"]["metadata"]["labels"].items()
     (c,) = pod["containers"]
     assert c["image"].startswith("docker.io/") and c["image"].endswith("/kubesupport:latest")
-    assert {p["name"]: p["containerPort"] for p in c["ports"]} == {"http": 8000, "webhook": 8443}
+    assert {p["name"]: p["containerPort"] for p in c["ports"]} == {"http": 8000, "teams": 8080, "webhook": 8443}
     env_from = {next(iter(k for k in e if k.endswith("Ref"))): e for e in c["envFrom"]}
     assert env_from["configMapRef"]["configMapRef"]["name"] == "kubesupport-config"
     assert env_from["secretRef"]["secretRef"] == {"name": "kubesupport-secrets", "optional": True}
@@ -90,20 +92,59 @@ def test_deployment():
     assert volumes["webhook-tls"]["secret"] == {"secretName": "kubesupport-webhook-tls", "optional": True}
 
 
-def test_service_targets_the_pod():
-    (svc,) = by_kind(DOCS, "Service")
+def test_services_target_the_pod():
+    services = {s["metadata"]["name"]: s for s in by_kind(DOCS, "Service")}
     (dep,) = by_kind(DOCS, "Deployment")
-    assert svc["spec"]["selector"] == dep["spec"]["selector"]["matchLabels"]
-    assert svc["spec"]["type"] == "ClusterIP"
+    for svc in services.values():
+        assert svc["spec"]["selector"] == dep["spec"]["selector"]["matchLabels"]
+        assert svc["spec"]["type"] == "ClusterIP"  # nothing is exposed outside the cluster
+    assert services["kubesupport"]["spec"]["ports"][0]["targetPort"] == "http"
+    assert services["kubesupport-teams"]["spec"]["ports"] == [{"name": "teams", "port": 80, "targetPort": "teams"}]
 
 
-def test_ingress_exposes_only_the_teams_webhook():
-    (ing,) = load("ingress.yaml")
-    assert ing["metadata"]["namespace"] == "kubesupport"
-    (rule,) = ing["spec"]["rules"]
-    (path,) = rule["http"]["paths"]
-    assert path["path"] == "/teams/webhook" and path["pathType"] == "Exact"
-    assert path["backend"]["service"] == {"name": "kubesupport", "port": {"name": "http"}}
+def test_no_load_balancer_or_ingress_anywhere():
+    kinds = {d["kind"] for d in DOCS + WEBHOOK_DOCS + TUNNEL_DOCS}
+    assert "Ingress" not in kinds
+    assert all(s["spec"].get("type", "ClusterIP") == "ClusterIP" for s in by_kind(DOCS + WEBHOOK_DOCS, "Service"))
+    assert not (ROOT / "deploy" / "ingress.yaml").exists()
+
+
+def test_network_policy_only_tunnel_reaches_the_teams_port():
+    (pol,) = by_kind(DOCS, "NetworkPolicy")
+    assert pol["spec"]["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "kubesupport"}
+    assert pol["spec"]["policyTypes"] == ["Ingress"]
+    rules = pol["spec"]["ingress"]
+    allowed = {p["port"]: r.get("from") for r in rules for p in r["ports"]}
+    assert set(allowed) == {8080, 8443}  # 8000, the internal API, is reachable from no pod
+    assert allowed[8080] == [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "kubesupport-tunnel"}}}]
+    assert allowed[8443] is None  # the API server's addresses aren't pods
+
+
+def test_tunnel_deployment_is_locked_down():
+    (dep,) = by_kind(TUNNEL_DOCS, "Deployment")
+    spec = dep["spec"]
+    pod = spec["template"]["spec"]
+    assert spec["replicas"] >= 2
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["securityContext"]["runAsNonRoot"] is True
+    assert pod["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
+    (c,) = pod["containers"]
+    image, _, tag = c["image"].rpartition(":")
+    assert image == "docker.io/cloudflare/cloudflared" and tag not in ("", "latest")
+    assert c["args"][0] == "tunnel" and "--no-autoupdate" in c["args"] and c["args"][-1] == "run"
+    (token,) = c["env"]
+    assert token == {"name": "TUNNEL_TOKEN", "valueFrom": {"secretKeyRef": {"name": "kubesupport-tunnel",
+                                                                          "key": "TUNNEL_TOKEN"}}}
+    sc = c["securityContext"]
+    assert sc["allowPrivilegeEscalation"] is False and sc["readOnlyRootFilesystem"] is True
+    assert sc["capabilities"]["drop"] == ["ALL"]
+    assert c["livenessProbe"]["httpGet"]["path"] == "/ready"
+    labels = spec["template"]["metadata"]["labels"]
+    (pol,) = by_kind(TUNNEL_DOCS, "NetworkPolicy")
+    assert pol["spec"]["podSelector"]["matchLabels"].items() <= labels.items()
+    assert pol["spec"]["policyTypes"] == ["Ingress"] and not pol["spec"].get("ingress")  # nothing may connect in
+    (pdb,) = by_kind(TUNNEL_DOCS, "PodDisruptionBudget")
+    assert pdb["spec"]["minAvailable"] == 1
 
 
 def test_activity_webhook_never_blocks_and_points_at_kubesupport():
