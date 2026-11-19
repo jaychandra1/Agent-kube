@@ -1,9 +1,9 @@
-"""Claude, through the Anthropic Messages API (LLM_PROVIDER=anthropic).
+"""Claude through the Anthropic Messages API (LLM_PROVIDER=anthropic).
 
-Thinking is left at the model's default (current models think adaptively). Callers send back
-the full response content, thinking blocks included, and only append to the history;
-agent.trim_history is the one place that cuts it. Current Claude models reject a forced
-tool choice, so `require_tool` is not sent; agent.py reminds the model in words instead.
+Thinking stays on the model's default. The full response content goes back into the history
+as it is, thinking blocks included, and agent.trim_history is the only place that cuts it.
+Current Claude models reject a forced tool choice, so require_tool is not sent and agent.py
+reminds the model in words instead.
 """
 from .base import ChatProvider, Limits, ProviderError
 
@@ -20,8 +20,8 @@ class ClaudeProvider(ChatProvider):
             raise ProviderError("the anthropic package is not installed") from e
         self._client = anthropic.Anthropic(api_key=api_key, timeout=limits.timeout)
         self.effort = effort
-        # Server-side refusal fallback: "default" re-runs a declined request on Anthropic's
-        # recommended fallback model inside the same API call; "off" disables it.
+        # server-side refusal fallback: with "default" Anthropic re-runs a declined request on
+        # their fallback model within the same call. "off" disables it
         self.fallbacks = "" if fallbacks.lower() in ("", "off", "none", "false", "0") else fallbacks
 
     def create(self, system, messages, tools, require_tool=None):

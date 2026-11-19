@@ -5,7 +5,7 @@ name: CI
 #   docker.io/<DOCKERHUB_USERNAME>/kubesupport:sha-<7 chars>  and  :latest
 # "Run workflow" on main (Actions tab) rebuilds and pushes the image without a code change:
 # use it to pick up operating-system security updates.
-# Needs (GitHub → Settings → Secrets and variables → Actions):
+# Needs (GitHub > Settings > Secrets and variables > Actions):
 #   variable DOCKERHUB_USERNAME  - your Docker Hub user or organization
 #   secret   DOCKERHUB_TOKEN     - a Docker Hub access token with Read & Write
 

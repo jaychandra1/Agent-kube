@@ -1,4 +1,4 @@
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 # kubesupport activity webhook.  DON'T apply this file directly: run
 #   deploy/webhook-cert.sh
 # which creates the TLS certificate, fills in <CA_BUNDLE> below and applies it.
@@ -12,7 +12,7 @@
 # Secrets: the API server includes the whole object in the request; kubesupport keeps only
 # the name. If Secret objects must never reach kubesupport, remove "secrets" from the
 # second rule below and re-run deploy/webhook-cert.sh.
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:

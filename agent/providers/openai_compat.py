@@ -1,16 +1,16 @@
 """Any OpenAI-compatible Chat Completions API: Groq, Google Gemini, OpenAI, Azure OpenAI
-(Microsoft Foundry), OpenRouter, Mistral, Ollama, or a custom endpoint (see catalog.py).
+(Microsoft Foundry), OpenRouter, Mistral, Ollama or a custom endpoint (see catalog.py).
 
-agent.py keeps its conversation in one canonical shape (the Anthropic Messages shape:
-assistant turns hold "text" and "tool_use" blocks; tool results come back as "tool_result"
-blocks in a user turn). This module converts that history to Chat Completions messages on
-every call and converts the reply back, so the investigation loop is the same for every
-provider.
+agent.py keeps its history in the Anthropic Messages shape (assistant turns with "text" and
+"tool_use" blocks, tool results as "tool_result" blocks in a user turn). We convert that to
+Chat Completions messages on every call and convert the reply back, so the investigation
+loop doesn't care which provider it is talking to.
 
-Free plans have small per-minute token limits (Groq's free plan: about 8K tokens per minute,
-and a single bigger request is refused). So each request is kept under a character budget by
-shortening the oldest tool results first, "too many requests" replies are retried after the
-`retry-after` delay, and a request the server calls too large is resent with less history.
+Free plans have small per-minute token limits. Groq's free plan is around 8K tokens per
+minute and a single bigger request is simply refused. So:
+  - each request is kept under a character budget, oldest tool results are shortened first
+  - "too many requests" is retried after the retry-after delay
+  - a request the server calls too large is resent with less history
 """
 import json
 import logging
@@ -31,13 +31,13 @@ def _get(block, key, default=None):
 
 
 def to_openai_tools(tools: list[dict]) -> list[dict]:
-    """Anthropic-style tool schemas -> Chat Completions function tools."""
+    """Anthropic style tool schemas -> Chat Completions function tools."""
     return [{"type": "function", "function": {"name": t["name"], "description": t.get("description", ""),
                                               "parameters": t["input_schema"]}} for t in tools]
 
 
 def to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
-    """Canonical history -> Chat Completions messages (system, user, assistant+tool_calls, tool)."""
+    """Our history -> Chat Completions messages (system, user, assistant + tool_calls, tool)."""
     out = [{"role": "system", "content": system}]
     tool_names = {}
     for m in messages:
@@ -52,7 +52,7 @@ def to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
                     calls.append({"id": _get(b, "id"), "type": "function",
                                   "function": {"name": _get(b, "name"), "arguments": json.dumps(_get(b, "input") or {})}})
             if not text and not calls:
-                continue  # an empty turn; servers reject an assistant message with no content
+                continue  # empty turn, servers reject an assistant message without content
             msg = {"role": "assistant", "content": text or None}
             if calls:
                 msg["tool_calls"] = calls
@@ -67,14 +67,14 @@ def to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
                                 "name": tool_names.get(_get(b, "tool_use_id"), ""), "content": str(_get(b, "content"))})
                 elif _get(b, "type") == "text":
                     texts.append(_get(b, "text"))
-            if texts:  # after the tool results, which must directly follow the assistant's tool_calls
+            if texts:  # has to come after the tool results, those must directly follow the tool_calls
                 out.append({"role": "user", "content": "\n".join(texts)})
     return out
 
 
 def fit_budget(messages: list[dict], max_chars: int, keep_last: int = 2) -> list[dict]:
-    """Shorten tool results until the messages fit `max_chars`: first the older ones (to a
-    stub), then, only if still too big, the latest `keep_last` ones (to 1500 characters)."""
+    """Shorten tool results until the messages fit max_chars. Older ones go first (down to a
+    stub), the latest keep_last only if that wasn't enough (down to 1500 chars)."""
     size = len(json.dumps(messages))
     tool_idx = [i for i, m in enumerate(messages) if m["role"] == "tool"]
     older, latest = (tool_idx[:-keep_last], tool_idx[-keep_last:]) if keep_last else (tool_idx, [])
@@ -112,10 +112,10 @@ def from_openai_response(data: dict) -> NS:
 
 
 class OpenAICompatibleProvider(ChatProvider):
-    """Chat Completions with tools, retries and a request-size budget.
+    """Chat Completions with tools, retries and a request size budget.
 
-    `limits.request_chars` covers the messages plus the tool definitions; together with
-    `limits.output_tokens` it keeps one request under a per-minute token limit."""
+    limits.request_chars covers the messages plus the tool definitions. Together with
+    limits.output_tokens that keeps one request under a per-minute token limit."""
 
     def __init__(self, name: str, title: str, model: str, limits: Limits, base_url: str, api_key: str = "",
                  auth: str = "bearer", reasoning_effort: str = "", attempts: int = 5, max_wait: float = 60):
@@ -130,7 +130,7 @@ class OpenAICompatibleProvider(ChatProvider):
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
-            if self.auth == "api-key":  # Azure OpenAI key authentication
+            if self.auth == "api-key":  # Azure OpenAI
                 headers["api-key"] = self.api_key
             else:
                 headers["Authorization"] = f"Bearer {self.api_key}"
@@ -149,7 +149,7 @@ class OpenAICompatibleProvider(ChatProvider):
         return payload
 
     def _compatible(self, payload: dict) -> dict:
-        """The same request without optional fields some servers reject."""
+        """The same request without the optional fields some servers reject."""
         p = dict(payload)
         if "tools" in p:
             p["tool_choice"] = "auto"
@@ -174,14 +174,14 @@ class OpenAICompatibleProvider(ChatProvider):
                 return from_openai_response(r.json())
             last_error = f"HTTP {r.status_code}: {r.text[:300]}"
             if r.status_code == 413 or "request too large" in r.text.lower():
-                # Larger than the per-minute token limit: send less history (Groq answers 413)
+                # over the per-minute token limit (Groq answers 413): retry with less history
                 budget //= 2
                 room = max(budget - len(json.dumps(payload.get("tools", []))), 2000)
                 payload = {**payload, "messages": fit_budget(to_openai_messages(system, messages), room)}
                 logger.info("Model API said the request is too large; retrying with less history")
                 continue
             if r.status_code == 400 and not tried_compatible:
-                tried_compatible = True  # e.g. forced tool_choice or reasoning_effort not supported
+                tried_compatible = True  # forced tool_choice or reasoning_effort not supported, probably
                 payload = self._compatible(payload)
                 continue
             if r.status_code == 429 or r.status_code >= 500:
@@ -189,7 +189,7 @@ class OpenAICompatibleProvider(ChatProvider):
                     wait = float((r.headers or {}).get("retry-after", ""))
                 except ValueError:
                     wait = 2 ** attempt
-                if wait > self.max_wait:  # e.g. the daily token limit: don't hold up the caller for hours
+                if wait > self.max_wait:  # daily token limit or similar, no point holding the caller for hours
                     last_error = f"HTTP {r.status_code}: rate limit, retry after {wait:.0f}s. {r.text[:200]}"
                     break
                 logger.info("Model API returned %s; retrying in %.0fs (attempt %d/%d)",

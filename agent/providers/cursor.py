@@ -1,19 +1,18 @@
-"""Cursor, through the Cursor SDK (LLM_PROVIDER=cursor, key CURSOR_API_KEY or LLM_API_KEY).
+"""Cursor, through the Cursor SDK (LLM_PROVIDER=cursor, key in CURSOR_API_KEY or LLM_API_KEY).
 
-Unlike the other providers, Cursor runs the agent loop itself. kubesupport hands Cursor's
-agent the question plus kubesupport's read-only Kubernetes tools as *custom tools*, and the
-agent calls them back.
+Unlike the other providers Cursor runs the agent loop itself. We hand its agent the question
+plus our read-only Kubernetes tools as custom tools, and it calls them back.
 
-Cursor offers custom tools to the model through its "mcp" tool group, so that group is the
-only built-in one switched on (`tools=["mcp"]`). Everything else stays off: no shell, no file
+Cursor exposes custom tools to the model through its "mcp" tool group, so that is the only
+built-in group we switch on (tools=["mcp"]). Everything else stays off: no shell, no file
 access, no web. No MCP server is configured and no project or user settings are loaded, so
-the only tools in that group are kubesupport's, which never change the cluster.
-(`tools=[]` would leave the model with no tools at all: it could only answer in text.)
+the only tools in that group are ours, and those can't change the cluster.
+Careful: tools=[] leaves the model with no tools at all, it can then only answer in text.
 
-The SDK starts a helper process (its "bridge", bundled in the cursor-sdk package) on first
+The SDK starts a helper process (the "bridge", bundled in the cursor-sdk package) on first
 use and keeps it running. One Cursor agent runs at a time.
 
-Needs a paid Cursor plan; usage is billed to the account that owns the API key.
+Needs a paid Cursor plan. Usage is billed to the account that owns the API key.
 """
 import logging
 import os
@@ -26,9 +25,9 @@ from .base import AgentProvider, Limits, ProviderError
 
 logger = logging.getLogger("kubesupport.llm")
 
-WORKDIR = os.path.join(tempfile.gettempdir(), "kubesupport-cursor")  # empty working folder for the agent
-ALLOWED_TOOL_GROUPS = ["mcp"]      # the group that carries kubesupport's custom tools; nothing else
-DISALLOWED_TOOL_GROUPS = ["shell"]  # never, whatever the list above becomes
+WORKDIR = os.path.join(tempfile.gettempdir(), "kubesupport-cursor")  # empty cwd for the agent
+ALLOWED_TOOL_GROUPS = ["mcp"]      # the group our custom tools live in, nothing else
+DISALLOWED_TOOL_GROUPS = ["shell"]  # never, whatever happens to the list above
 TOOLS_NOTE = ("Your cluster tools are provided as MCP tools (server \"custom-user-tools\"); the tool names used "
               "below are those tools. They are your only tools: you have no shell and no kubectl.")
 _waiter = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cursor-wait")
@@ -44,8 +43,8 @@ def _sdk():
 
 
 class CursorSession:
-    """One conversation with a Cursor agent; the system prompt goes with the first message.
-    `tool_calls` counts how often the agent used kubesupport's tools."""
+    """One conversation with a Cursor agent. The system prompt goes out with the first message.
+    tool_calls counts how often the agent used our tools."""
 
     def __init__(self, agent, system: str, timeout: float):
         self._agent, self._system, self._timeout = agent, system, timeout
@@ -61,7 +60,7 @@ class CursorSession:
         except FuturesTimeout:
             try:
                 run.cancel()
-            except Exception:  # the run may have just finished
+            except Exception:  # may have finished in the meantime
                 pass
             raise ProviderError(f"Cursor run took longer than {self._timeout:.0f}s (LLM_TIMEOUT_SECONDS)")
         status = str(getattr(result, "status", ""))
@@ -76,7 +75,7 @@ class CursorProvider(AgentProvider):
 
     def __init__(self, name: str, title: str, model: str, limits: Limits, api_key: str):
         super().__init__(name, title, model, limits)
-        _sdk()  # fail at startup, not on the first question, when the SDK is missing
+        _sdk()  # if the SDK is missing, fail at startup and not on the first question
         self.api_key = api_key
 
     @contextmanager
@@ -97,7 +96,7 @@ class CursorProvider(AgentProvider):
         options = sdk.AgentOptions(
             model=self.model, api_key=self.api_key, name="kubesupport",
             tools=list(ALLOWED_TOOL_GROUPS), disallowed_tools=list(DISALLOWED_TOOL_GROUPS),
-            # an empty folder and no project/user settings: no other MCP servers, rules or hooks are loaded
+            # empty folder + no project/user settings = no other MCP servers, rules or hooks get loaded
             local=sdk.LocalAgentOptions(cwd=WORKDIR, setting_sources=[], custom_tools=custom_tools),
         )
         with self._lock:

@@ -1,28 +1,28 @@
 """Image build step: replace the vulnerable `undici` bundled in the Cursor SDK.
 
-Run by the Dockerfile after `pip install cursor-sdk`. Not used at runtime.
+Run by the Dockerfile right after `pip install cursor-sdk`, not used at runtime.
 
-Why: cursor-sdk ships a helper program (its "bridge") with its own Node.js and node_modules.
-Up to cursor-sdk 1.3.1 those include undici 5.29.0, which brings @fastify/busboy 2.1.1. The
-undici 5.x line gets no more security fixes, so image scanners report its CVEs (13 for
-undici, 2 for @fastify/busboy in November 2026). undici is there only because
-@connectrpc/connect-node imports its `Headers` class as a fallback for Node.js < 18; the
-bridge runs on its bundled Node.js 22, so that fallback is never used.
+Background: cursor-sdk bundles a helper program (the "bridge") with its own Node.js and
+node_modules. Up to 1.3.1 that includes undici 5.29.0, which pulls in @fastify/busboy 2.1.1.
+The undici 5.x line doesn't get security fixes any more, so image scanners flag it (13 CVEs
+for undici and 2 for busboy in Nov 2026). undici is only there because
+@connectrpc/connect-node imports its Headers class as a fallback for Node < 18. The bridge
+runs on its bundled Node 22, so that fallback is never used.
 
-What it does:
-  1. finds the bridge's node_modules inside the installed cursor_sdk package;
-  2. stops (nothing to do) when undici is absent or already at least UNDICI_VERSION;
-  3. refuses to continue if anything other than the known Headers fallback imports undici,
-     because then a major-version swap would need a review;
-  4. downloads the pinned undici release from the npm registry and checks its SHA-512;
-  5. replaces node_modules/undici with it, and removes @fastify/busboy when nothing needs it;
-  6. loads the bridge's modules with the bundled Node.js to prove they still import.
-Any failure fails the image build: the image is never built half-patched.
+Steps:
+  1. find the bridge's node_modules inside the installed cursor_sdk package
+  2. nothing to do if undici is missing or already at least UNDICI_VERSION
+  3. bail out if anything besides the known Headers fallback imports undici, a major
+     version swap would need a proper look then
+  4. download the pinned undici from the npm registry and check its SHA-512
+  5. replace node_modules/undici, and remove @fastify/busboy if nothing needs it
+  6. load the bridge's modules with the bundled Node to make sure they still import
+Any failure fails the image build. We never want a half-patched image.
 
-To move to a newer undici: set UNDICI_VERSION and UNDICI_INTEGRITY (the "dist.integrity"
-value from https://registry.npmjs.org/undici/<version>) and rebuild. Stay on a release line
-whose "engines" the bundled Node.js satisfies. Delete this step once cursor-sdk itself ships a
-fixed undici (the script then reports "nothing to do").
+Bumping undici: set UNDICI_VERSION and UNDICI_INTEGRITY ("dist.integrity" from
+https://registry.npmjs.org/undici/<version>) and rebuild. Stay on a release line whose
+"engines" the bundled Node satisfies. Once cursor-sdk ships a fixed undici this script only
+reports "nothing to do" and the build step can go.
 """
 import argparse
 import base64
@@ -41,7 +41,7 @@ UNDICI_VERSION = "6.29.1"
 UNDICI_INTEGRITY = "sha512-EvRlUt/QqAEvXdQeRMYUfwOQsfzpDztykrG2owGEE/rBOBoYv9uF39ZzsNDh4lTFHhTr2XOZjKkYgueD12ZmGA=="
 TARBALL_URL = "https://registry.npmjs.org/undici/-/undici-{version}.tgz"
 
-# The only code allowed to import undici: connect-node's Headers fallback for old Node.js.
+# the one place that may import undici: connect-node's Headers fallback for old Node
 KNOWN_IMPORTERS = re.compile(r"^@connectrpc/connect-node/dist/(esm|cjs)/node-headers-polyfill\.js$")
 IMPORTS = re.compile(r"""(?:require\(\s*|from\s+|import\(\s*|import\s+)["']({name})(?:/[^"']*)?["']""")
 SMOKE_TEST = ("const u = await import('undici');"
@@ -72,7 +72,7 @@ def package_json(path: Path) -> dict:
 
 
 def packages(node_modules: Path):
-    """(name, directory) for every top-level package, scoped ones included."""
+    """Yields (name, directory) for every top-level package, scoped ones too."""
     for entry in sorted(node_modules.iterdir()):
         if entry.name.startswith("@") and entry.is_dir():
             for scoped in sorted(entry.iterdir()):
@@ -83,7 +83,7 @@ def packages(node_modules: Path):
 
 
 def importers(bridge: Path, name: str) -> list[str]:
-    """Files (relative to node_modules, or dist/…) outside the package itself that import `name`."""
+    """Files outside the package itself that import `name` (paths relative to node_modules or dist/)."""
     pattern = re.compile(IMPORTS.pattern.format(name=re.escape(name)))
     node_modules = bridge / "node_modules"
     found = []
@@ -117,7 +117,7 @@ def verify(data: bytes, integrity: str):
 
 
 def extract(data: bytes, target: Path):
-    """Unpack an npm tarball (everything is under "package/") into `target`, files only."""
+    """Unpack an npm tarball into target. Everything in it sits under "package/". Files only."""
     target.mkdir(parents=True)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
         for member in archive.getmembers():
@@ -140,9 +140,9 @@ def needed_by(node_modules: Path, name: str) -> list[str]:
 
 
 def smoke_test(bridge: Path):
-    """Load the bridge's modules with its own Node.js. If that Node.js can't run here at all
-    (a build for another CPU under emulation), say so and carry on: the same check runs in the
-    build for the native CPU."""
+    """Load the bridge's modules with its own Node. If that Node can't run here at all (a build
+    for another CPU under emulation) we say so and carry on, the build for the native CPU runs
+    the same check."""
     node = next((p for p in (bridge / "bin" / "node", bridge / "bin" / "node.exe") if p.is_file()), None)
     if node is None:
         raise PatchError("the bridge's bundled Node.js was not found, so the patch can't be checked")

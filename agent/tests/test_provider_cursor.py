@@ -115,7 +115,7 @@ def test_slow_run_is_cancelled(monkeypatch):
     assert sdk.created[0].runs[0].cancelled and sdk.created[0].closed
 
 
-# ─── Through agent.py: RCA and chat with an agent provider ───────────────────
+# --- Through agent.py: RCA and chat with an agent provider ---
 
 def rca_script(remind_first=False):
     """Investigate with list_pods, then submit the RCA (optionally only after a reminder)."""

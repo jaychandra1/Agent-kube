@@ -62,7 +62,7 @@ def diagnose(workload="Deployment/web"):
     return rca
 
 
-# ─── Pod rules ───────────────────────────────────────────────────────────────
+# --- Pod rules ---
 
 @pytest.mark.parametrize("message,expect", [
     ('rpc error: manifest for repo/app:9 not found: manifest unknown', "doesn't exist"),
@@ -178,7 +178,7 @@ def test_timeline_uses_real_times_in_order(cluster, monkeypatch):
     assert timeline[-1]["event"] == "kubesupport diagnosed the problem (built-in rules)"
 
 
-# ─── Incidents without a pod ─────────────────────────────────────────────────
+# --- Incidents without a pod ---
 
 def incident(reason, detail, workload="Deployment/kubesupport", namespace="kubesupport", **extra):
     return {"reason": reason, "detail": detail, "workload": workload, "namespace": namespace, "pod": None, **extra}

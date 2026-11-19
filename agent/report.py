@@ -1,4 +1,4 @@
-"""HTML version of an RCA, saved to REPORT_DIR and served by GET /rca/latest."""
+"""Renders an RCA as HTML. Saved to REPORT_DIR, the last one is served at /rca/latest."""
 import os
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -8,12 +8,12 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templat
 env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape(["html", "j2"]))
 REPORT_DIR = os.getenv("REPORT_DIR", "/tmp/reports")
 
-# The last report rendered by this pod
+# last report this pod rendered
 LATEST_HTML = ""
 
 
 def render_rca(rca: dict) -> tuple[str, str]:
-    """Render the RCA to HTML, save it as REPORT_DIR/rca-<timestamp>.html, return (file name, HTML)."""
+    """Returns (file name, html)."""
     global LATEST_HTML
     now = timefmt.now()
     page = env.get_template("rca.html.j2").render(r=rca, generated=timefmt.fmt(now))

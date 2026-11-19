@@ -1,13 +1,14 @@
-"""kubesupport HTTP API.
+"""HTTP API.
 
-`app` (port 8000, internal only):  /healthz /ready /chat /rca /rca/latest /alerts/status /alerts/test
-                                   /activity /activity/status /security/restricted, and /teams/webhook
-                                   for local testing
-`teams_app` (port 8080, the only one the Cloudflare Tunnel reaches): POST /teams/webhook and
-                                   nothing else, not even /docs, so a mistake in the Cloudflare
-                                   settings can never expose the internal API
-The activity webhook (called by the Kubernetes API server) is a separate HTTPS app on port
-8443, in activity.py. main.py starts all three.
+app (8000, internal only)
+    /healthz /ready /chat /rca /rca/latest /alerts/status /alerts/test /activity
+    /activity/status /security/restricted, plus /teams/webhook for local testing
+teams_app (8080, the only port the Cloudflare tunnel reaches)
+    POST /teams/webhook and nothing else, not even /docs. A mistake in the Cloudflare
+    settings can't expose the internal API this way.
+
+The activity webhook the API server calls is a separate HTTPS app on 8443 (activity.py).
+main.py starts all three.
 """
 import hmac
 import logging
@@ -33,7 +34,7 @@ logger = logging.getLogger("kubesupport.app")
 
 API_KEY = os.getenv("AGENT_API_KEY", "").strip()
 WATCH_ENABLED = os.getenv("WATCH_ENABLED", "true").strip().lower() in ("1", "true", "yes")
-# Web servers that stopped (set by main.py). A dead Teams server fails /healthz so the pod restarts.
+# Servers that died, filled in by main.py. "teams" in here makes /healthz fail.
 SERVER_FAILURES: dict[str, str] = {}
 
 
@@ -59,14 +60,14 @@ async def lifespan(_app: FastAPI):
         activity.FEED.start()
     yield
     watcher.WATCHER.stop()
-    activity.FEED.stop()  # sends what was collected before the pod stops
+    activity.FEED.stop()  # flushes the last batch
 
 
 app = FastAPI(title="kubesupport", version="2.0.0", lifespan=lifespan)
 
 
 def auth(key: str | None):
-    """The internal API is closed unless AGENT_API_KEY is set, and then needs that key."""
+    """No AGENT_API_KEY configured means the internal API is off, otherwise the header must match."""
     if not API_KEY:
         raise HTTPException(status_code=403, detail="The internal API is off: set AGENT_API_KEY in the Secret")
     if not key or not hmac.compare_digest(key, API_KEY):
@@ -87,8 +88,8 @@ class RcaIn(BaseModel):
 
 @app.get("/healthz")
 def healthz():
-    """Liveness: fails (503) when the watcher stopped scanning or the Teams server died, so
-    Kubernetes restarts the pod instead of it silently not alerting."""
+    """Liveness. 503 when the watcher stopped scanning or the Teams server died, better a
+    restart than a pod that silently stopped alerting."""
     problems = []
     ok, why = watcher.WATCHER.healthy()
     if not ok:
@@ -111,7 +112,7 @@ teams_app = FastAPI(title="kubesupport Teams webhook", docs_url=None, redoc_url=
 @teams_app.post("/teams/webhook")
 @app.post("/teams/webhook")
 async def teams_webhook(request: Request, authorization: str = Header(None)):
-    """Teams outgoing webhook. The reply must come back within 5 seconds."""
+    """Teams outgoing webhook. Teams waits 5 seconds for the reply."""
     if not teams.OUTGOING_SECRET:
         raise HTTPException(status_code=404, detail="Teams outgoing webhook is not configured")
     raw = await request.body()
@@ -149,7 +150,7 @@ def rca(body: RcaIn, x_api_key: str = Header(None)):
 
 @app.get("/rca/latest", response_class=HTMLResponse)
 def get_latest_report(x_api_key: str = Header(None)):
-    """The last RCA rendered by this pod, as HTML. Internal only."""
+    """Last RCA this pod rendered, as HTML."""
     auth(x_api_key)
     if report.LATEST_HTML:
         return HTMLResponse(content=report.LATEST_HTML, status_code=200)
@@ -174,7 +175,7 @@ def alerts_status(x_api_key: str = Header(None)):
 
 @app.post("/alerts/test")
 def alerts_test(x_api_key: str = Header(None)):
-    """Send a sample card to every alert webhook, to check the Teams setup."""
+    """Send a test card to every alert webhook."""
     auth(x_api_key)
     if not teams.ALERT_TARGETS:
         raise HTTPException(status_code=400, detail="TEAMS_ALERT_WEBHOOK_URLS is not set")
@@ -184,7 +185,7 @@ def alerts_test(x_api_key: str = Header(None)):
 
 @app.get("/activity")
 def activity_recent(limit: int = 50, x_api_key: str = Header(None)):
-    """Recent cluster activity (exec, created/deleted objects, security changes, updates)."""
+    """Recent cluster activity."""
     auth(x_api_key)
     events = activity.FEED.latest(max(1, min(limit, 500)))
     return {"count": len(events), "events": [dict(e, text=activity.describe(e)) for e in events]}
@@ -192,7 +193,7 @@ def activity_recent(limit: int = 50, x_api_key: str = Header(None)):
 
 @app.get("/security/restricted")
 def security_restricted(limit: int = 50, x_api_key: str = Header(None)):
-    """Questions about kubesupport itself that were refused since this pod started: who, what, why."""
+    """Refused questions about kubesupport itself, since the pod started."""
     auth(x_api_key)
     events = boundaries.recent(max(1, min(limit, boundaries.MAX_EVENTS)))
     return {"enabled": boundaries.ENABLED, "protected_namespaces": sorted(boundaries.PROTECTED_NAMESPACES),
@@ -201,6 +202,6 @@ def security_restricted(limit: int = 50, x_api_key: str = Header(None)):
 
 @app.get("/activity/status")
 def activity_status(x_api_key: str = Header(None)):
-    """Is the activity webhook on, and when did the API server last call it?"""
+    """State of the activity webhook: enabled, cert present, last call."""
     auth(x_api_key)
     return activity.FEED.status()

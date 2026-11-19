@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 # Sets up kubesupport's activity webhook (exec / new services / RBAC changes / updates):
 #   1. creates a private CA and a TLS certificate for kubesupport-webhook.kubesupport.svc
 #      (valid 10 years),
@@ -12,7 +12,7 @@
 # Windows has openssl and base64.
 #
 # Usage:  ./deploy/webhook-cert.sh
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 set -euo pipefail
 
 NS=kubesupport

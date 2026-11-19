@@ -1,4 +1,4 @@
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 # kubesupport: everything it needs, in one file.
 #
 # Before applying, edit two things (search for "EDIT"):
@@ -10,7 +10,7 @@
 #
 # Permissions: kubesupport can READ every object in the cluster, in every namespace, except
 # Secrets. It cannot create, change or delete anything.
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -27,7 +27,7 @@ metadata:
   labels:
     app.kubernetes.io/name: kubesupport
 ---
-# ── PERMISSIONS: cluster-wide, read-only, never Secrets ──────────────────────
+# --- PERMISSIONS: cluster-wide, read-only, never Secrets ---
 # 1. Kubernetes' built-in "view" role, in every namespace: pods, logs, services, endpoints,
 #    ingresses, deployments, statefulsets, jobs, cronjobs, configmaps, PVCs, HPAs, network
 #    policies, events, ... (and the custom resources that register with "view").
@@ -108,7 +108,7 @@ subjects:
     name: kubesupport
     namespace: kubesupport
 ---
-# ── SETTINGS ─────────────────────────────────────────────────────────────────
+# --- SETTINGS ---
 # After changing these: kubectl apply -f deploy/deployment.yaml && kubectl -n kubesupport rollout restart deploy/kubesupport
 apiVersion: v1
 kind: ConfigMap
@@ -122,7 +122,7 @@ data:
   TIMEZONE: "Asia/Kolkata"         # EDIT: time zone for times in RCAs and reports (IANA name, e.g. "Europe/London"; default UTC)
   LOG_LEVEL: "INFO"                # DEBUG | INFO | WARNING | ERROR
   ALLOWED_NAMESPACES: "*"          # namespaces for incident alerts and Teams answers; "*" = all (permissions are cluster-wide either way)
-  # ── AI model (docs/AI_PROVIDERS.md). The key goes in the Secret as LLM_API_KEY. ──
+  # --- AI model (docs/AI_PROVIDERS.md). The key goes in the Secret as LLM_API_KEY. ---
   LLM_PROVIDER: "cursor"             # EDIT: groq | anthropic | cursor | gemini | openai | azure-openai | openrouter | mistral | ollama | custom | none
   LLM_MODEL: ""                    # "" = the provider's default model (required for openai, azure-openai, ollama, custom)
   LLM_BASE_URL: ""                 # "" = the provider's default endpoint (required for azure-openai, ollama, custom)
@@ -278,7 +278,7 @@ spec:
       port: 80
       targetPort: teams
 ---
-# ── NETWORK POLICY: who may connect to the kubesupport pod ─────────────────────
+# --- NETWORK POLICY: who may connect to the kubesupport pod ---
 # Enforced when the cluster runs a network-policy engine (on EKS: the VPC CNI with network
 # policy turned on; docs/INSTALLATION.md, Step 3.4). Without one it is simply ignored.
 #   8080 (Teams webhook)      only from the Cloudflare Tunnel pods

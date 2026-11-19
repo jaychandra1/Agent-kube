@@ -1,7 +1,7 @@
-"""Time zone for every time kubesupport shows people (RCA timelines, reports).
+"""Time zone for the times we show to people (RCA timelines, reports).
 
-TIMEZONE is an IANA name such as "Asia/Kolkata" or "Europe/London"; default UTC.
-Kubernetes timestamps are UTC; they are converted for display only.
+TIMEZONE is an IANA name like "Asia/Kolkata", default UTC. Kubernetes timestamps are UTC,
+we only convert for display.
 """
 import logging
 import os
@@ -24,7 +24,7 @@ ZONE = _zone(TIMEZONE)
 
 
 def parse(value) -> datetime | None:
-    """A datetime, or a string as the Kubernetes client prints one; None when missing."""
+    """Takes a datetime or the string the k8s client prints. None if missing or unparseable."""
     if isinstance(value, datetime):
         dt = value
     elif value and str(value) not in ("None", ""):
@@ -38,7 +38,7 @@ def parse(value) -> datetime | None:
 
 
 def fmt(value) -> str:
-    """'2026-11-16 16:24 IST' in the configured zone; '' when the value is missing."""
+    """e.g. '2026-11-16 16:24 IST'. Empty string if there's no value."""
     dt = parse(value)
     return dt.astimezone(ZONE).strftime("%Y-%m-%d %H:%M %Z") if dt else ""
 

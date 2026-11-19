@@ -30,7 +30,7 @@ ALLOWED_RAW = os.getenv("ALLOWED_NAMESPACES", "default")
 ALLOWED = {n.strip() for n in ALLOWED_RAW.split(",") if n.strip()}
 RUNBOOK_DIR = os.getenv("RUNBOOK_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "runbooks"))
 
-K8S_TIMEOUT = (5, 30)   # (connect, read) seconds for every Kubernetes API call: a hung call never blocks forever
+K8S_TIMEOUT = (5, 30)   # (connect, read) seconds, passed to every API call so nothing hangs forever
 
 _KV = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|authorization)(\"?\s*[:=]\s*\"?)([^\s\",;]+)")
 _URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@]+:)[^\s@/]+@")
@@ -51,7 +51,7 @@ def redact(text: str) -> str:
 
 
 def _valid(name, what="name") -> str:
-    """Kubernetes object names only: nothing that could change the API path (e.g. '..' or '/')."""
+    """Valid k8s object names only, so nobody can sneak '..' or '/' into the API path."""
     if not isinstance(name, str) or not _DNS_NAME.match(name) or ".." in name:
         raise ValueError(f"invalid {what} '{name}'")
     return name
@@ -60,7 +60,7 @@ def _valid(name, what="name") -> str:
 def _ns(ns: str):
     if not isinstance(ns, str) or not _DNS_LABEL.match(ns):
         raise ValueError(f"invalid namespace '{ns}'")
-    boundaries.check(namespace=ns)  # Teams users never read kubesupport's own namespace
+    boundaries.check(namespace=ns)  # our own namespace is off limits from Teams
     if "*" not in ALLOWED and ns not in ALLOWED:
         raise ValueError(f"namespace '{ns}' not allowed; allowed: {sorted(ALLOWED)}")
 
@@ -202,8 +202,8 @@ def watched_namespaces_label() -> str:
 
 
 def pods_by_namespace(unchecked: set | None = None) -> dict:
-    """Pods in the watched namespaces: every namespace when ALLOWED_NAMESPACES is "*".
-    A namespace that can't be read is logged and added to `unchecked` ("pods:<ns>" or "pods:*")."""
+    """Pods of the watched namespaces (all of them when ALLOWED_NAMESPACES is "*").
+    A namespace we can't read is logged and goes into `unchecked` as "pods:<ns>" or "pods:*"."""
     out = {}
     if "*" in ALLOWED:
         try:
@@ -267,9 +267,8 @@ def scan_cluster_for_issues():
             logger.warning("Could not check pods in %s: %s", ns, e)
     return issues
 
-# ─── Any object in the cluster (read-only, never Secrets) ───────────────────
-# Uses the Kubernetes dynamic client, so every kind works: core objects, apps,
-# networking, storage, RBAC, and custom resources (CRDs).
+# --- generic reads: any kind, never Secrets ---
+# Goes through the dynamic client so it works for every kind, CRDs included.
 
 _dynamic = None
 REFUSED_KINDS = {"secret", "secrets"}
@@ -285,7 +284,7 @@ def _dyn():
 
 
 def _resolve_kind(kind: str):
-    """API resource for a kind, plural or short name: 'Service', 'services' or 'svc'."""
+    """Find the API resource by kind, plural or short name ('Service', 'services', 'svc')."""
     k = (kind or "").strip().lower()
     if k in REFUSED_KINDS:
         raise ValueError("kubesupport never reads Secrets.")
@@ -293,14 +292,14 @@ def _resolve_kind(kind: str):
     for r in _dyn().resources.search():
         name = getattr(r, "name", "") or ""
         if "/" in name or "list" not in (getattr(r, "verbs", None) or []):
-            continue  # subresources and objects that can't be listed
+            continue  # subresources, and things that can't be listed
         names = {r.kind.lower(), name.lower(), (getattr(r, "singular_name", "") or "").lower(),
                  *[s.lower() for s in (getattr(r, "short_names", None) or [])]}
         if k in names:
             matches.append(r)
     if not matches:
         raise ValueError(f"unknown kind '{kind}' (try e.g. services, ingresses, nodes, configmaps, jobs)")
-    # Prefer the preferred API version, then the core group.
+    # preferred API version first, then the core group
     matches.sort(key=lambda r: (not getattr(r, "preferred", False), bool(r.group), r.group or ""))
     if matches[0].kind.lower() == "secret":
         raise ValueError("kubesupport never reads Secrets.")
@@ -319,7 +318,7 @@ MAX_INGRESS_ROUTES = 15
 
 
 def _lb_addresses(status: dict) -> list[str]:
-    """Hostnames or IPs a load balancer assigned (Service or Ingress status)."""
+    """Load balancer hostnames / IPs from a Service or Ingress status."""
     return [i.get("hostname") or i.get("ip") for i in ((status.get("loadBalancer") or {}).get("ingress") or [])
             if i.get("hostname") or i.get("ip")]
 
@@ -334,12 +333,12 @@ def _backend(backend: dict | None) -> str:
 
 
 def _ingress_summary(obj: dict) -> str:
-    """Everything an Ingress serves: class, load balancer address, and every URL with the
-    service it goes to, e.g. 'https://shop.example.com/api -> api:8080'."""
+    """Class, LB address and every URL with its backend,
+    e.g. 'https://shop.example.com/api -> api:8080'."""
     spec, status = obj.get("spec") or {}, obj.get("status") or {}
     annotations = (obj.get("metadata") or {}).get("annotations") or {}
     tls_hosts = [h for t in spec.get("tls") or [] for h in t.get("hosts") or []]
-    # ALB ingresses terminate HTTPS with an ACM certificate named in annotations, not in spec.tls
+    # ALB terminates TLS with an ACM cert given in annotations, spec.tls is empty there
     alb_https = (any(k.endswith("/certificate-arn") for k in annotations)
                  or "HTTPS" in annotations.get("alb.ingress.kubernetes.io/listen-ports", ""))
 
@@ -365,7 +364,7 @@ def _ingress_summary(obj: dict) -> str:
 
 
 def _summary(kind: str, obj: dict) -> str:
-    """One line of status for common kinds; status.phase or ready conditions otherwise."""
+    """One status line. Common kinds get a real summary, the rest status.phase or conditions."""
     spec, status = obj.get("spec") or {}, obj.get("status") or {}
     if kind == "Service":
         ports = ",".join(f"{p.get('port')}/{p.get('protocol', 'TCP')}" for p in spec.get("ports") or [])
@@ -393,9 +392,9 @@ def _summary(kind: str, obj: dict) -> str:
 
 
 def list_resources(kind, namespace=None):
-    """Objects of any kind (not Secrets), with name, namespace, age and a short status."""
+    """List objects of any kind except Secrets: name, namespace, age, short status."""
     r = _resolve_kind(kind)
-    page = {"limit": MAX_LIST_ITEMS + 1, "_request_timeout": K8S_TIMEOUT}  # never load a whole big list
+    page = {"limit": MAX_LIST_ITEMS + 1, "_request_timeout": K8S_TIMEOUT}  # don't pull in huge lists
     if r.namespaced and namespace:
         _ns(namespace)
         results = [r.get(namespace=namespace, **page)]
@@ -419,8 +418,8 @@ def list_resources(kind, namespace=None):
 
 
 def _hide_env_values(node):
-    """Replace every literal environment-variable value with [REDACTED]: env values often hold
-    passwords and connection strings. Names, valueFrom references and everything else stay."""
+    """Blank out literal env values, they tend to hold passwords and connection strings.
+    Names and valueFrom refs are kept."""
     if isinstance(node, dict):
         for key, value in node.items():
             if key == "env" and isinstance(value, list):
@@ -436,7 +435,7 @@ def _hide_env_values(node):
 
 
 def get_resource(kind, name, namespace=None):
-    """The full definition and status of one object of any kind (not Secrets), redacted."""
+    """Full spec and status of one object (not Secrets), redacted."""
     r = _resolve_kind(kind)
     if r.namespaced:
         if not namespace:
@@ -444,9 +443,9 @@ def get_resource(kind, name, namespace=None):
         _ns(namespace)
         obj = r.get(name=_valid(name), namespace=namespace, _request_timeout=K8S_TIMEOUT).to_dict()
     else:
-        boundaries.check(name=_valid(name))  # kubesupport's own cluster-wide objects (roles, webhook, namespace)
+        boundaries.check(name=_valid(name))  # our own cluster-scoped objects (roles, webhook, namespace)
         obj = r.get(name=name, _request_timeout=K8S_TIMEOUT).to_dict()
-        if boundaries.is_restricted() and r.kind == "Node":  # a node lists the images of every pod on it
+        if boundaries.is_restricted() and r.kind == "Node":  # node status lists every image on it, ours too
             status = obj.get("status") or {}
             if status.get("images"):
                 status["images"] = [i for i in status["images"] if not boundaries.mentions_protected(json.dumps(i))]
@@ -491,10 +490,10 @@ TOOLS = {
 TOOL_SCHEMAS = [{"name": n, "description": d, "input_schema": s} for n, (_, d, s) in TOOLS.items()]
 
 def call_tool(name: str, args: dict, max_chars: int = 15000, restricted: bool | None = None) -> str:
-    """Run one tool for the model. Output is cut to `max_chars` (smaller for models with
-    tight token limits, such as Groq's) and marked as untrusted data.
-    `restricted` switches the boundaries on for this call (see boundaries.py); None keeps what
-    the calling thread has. A blocked call returns a notice for the model instead of data."""
+    """Run one tool for the model. Output is cut to max_chars (small for providers with tight
+    token limits like Groq) and wrapped as untrusted data.
+    restricted turns the boundaries on for this call (boundaries.py), None keeps whatever the
+    calling thread has. A blocked call gives the model a notice instead of data."""
     restricted = boundaries.is_restricted() if restricted is None else restricted
     try:
         with boundaries.restricted_access(restricted):
@@ -512,12 +511,12 @@ def call_tool(name: str, args: dict, max_chars: int = 15000, restricted: bool | 
     return f"<untrusted_data>\n{text}\n</untrusted_data>"
 
 
-# ─── Incident detection for the watcher ──────────────────────────────────────
-# Unlike scan_cluster_for_issues (any restart, ever), this reports what is wrong
-# *now*, with stable keys so the watcher can tell new incidents from old ones.
+# --- incident detection (watcher) ---
+# scan_cluster_for_issues flags any restart, ever. This reports what is broken right now,
+# with stable keys so the watcher can tell new incidents from known ones.
 
-# Waiting reasons, grouped so that states a failing container alternates
-# between (e.g. ErrImagePull <-> ImagePullBackOff) map to one incident.
+# A failing container flips between states (ErrImagePull <-> ImagePullBackOff), so the
+# waiting reasons are grouped into one category per incident.
 WAITING_CATEGORY = {
     "CrashLoopBackOff": "CrashLoop",
     "ImagePullBackOff": "ImagePull",
@@ -547,12 +546,12 @@ def _age_seconds(ts, now) -> float:
 
 
 _RS_HASH = re.compile(r"^(.+)-[a-z0-9]{5,10}$")
-# How long an event-based problem (FailedCreate, eviction) stays an incident after it was last seen
+# event based problems (FailedCreate, eviction) stay an incident this long after last seen
 EVENT_WINDOW_SECONDS = 15 * 60
 
 
 def _owner_workload(kind: str, name: str) -> str:
-    """The workload behind a controller: a ReplicaSet "api-5d8f7c9b6" belongs to Deployment "api"."""
+    """ReplicaSet "api-5d8f7c9b6" -> "Deployment/api", other kinds stay as they are."""
     if kind == "ReplicaSet":
         m = _RS_HASH.match(name)
         return f"Deployment/{m.group(1)}" if m else f"ReplicaSet/{name}"
@@ -564,8 +563,8 @@ def _event_time(e):
 
 
 def _latest_jobs(jobs: list) -> list:
-    """Standalone Jobs, plus only the newest Job of each CronJob: a CronJob's failure is over
-    once a later run succeeds or is running."""
+    """Standalone Jobs plus the newest Job of each CronJob. An old failed run doesn't matter
+    once a later one succeeded or is running."""
     newest, out = {}, []
     for j in jobs:
         cron = next((r.name for r in (j.metadata.owner_references or []) if r.kind == "CronJob"), None)
@@ -582,13 +581,13 @@ def _latest_jobs(jobs: list) -> list:
 def find_incidents(pods_by_ns: dict, nodes: list, prev_restarts: dict, now: datetime,
                    recent_seconds: float = 180, pending_grace_minutes: float = 5,
                    events: list = (), jobs: list = ()):
-    """Pure function behind detect_incidents (easy to unit-test with fake objects).
+    """The logic behind detect_incidents, kept pure so it can be tested with fake objects.
 
-    pods_by_ns: {namespace: [V1Pod]}; nodes: [V1Node]; prev_restarts: {"<pod uid>/<container>": count}
-    from the previous scan. A crash counts when the restart count went up since then, or,
-    for a container not seen before, when it last terminated within `recent_seconds`.
-    events: FailedCreate events (pods a controller can't create); jobs: Jobs in the watched
-    namespaces. Returns ({incident key: incident}, new restart counts)."""
+    pods_by_ns is {namespace: [V1Pod]}, prev_restarts is {"<pod uid>/<container>": count} from
+    the previous scan. A crash counts when the restart count went up since then, or, for a
+    container we haven't seen before, when it terminated within recent_seconds.
+    events are FailedCreate events, jobs are the Jobs of the watched namespaces.
+    Returns ({incident key: incident}, new restart counts)."""
     incidents = {}
     restarts = {}
 
@@ -610,7 +609,7 @@ def find_incidents(pods_by_ns: dict, nodes: list, prev_restarts: dict, now: date
                     add(ns, _workload_of(p), "Evicted", None, (p.status.message or "evicted")[:300])
                 continue
             if p.status.phase not in ("Pending", "Running"):
-                continue  # Succeeded/Failed pods are finished; not an ongoing incident
+                continue  # finished pods aren't incidents
             name = p.metadata.name
             workload = _workload_of(p)
             found = False
@@ -655,7 +654,7 @@ def find_incidents(pods_by_ns: dict, nodes: list, prev_restarts: dict, now: date
             add("", f"Node/{n.metadata.name}", "NodeNotReady", None,
                 f"Ready={ready.status} {ready.reason or ''} - {(ready.message or '')[:300]}".strip())
 
-    # Controllers that can't create pods at all (no pod exists, so the pod rules can't see it)
+    # controllers that can't create pods at all. There is no pod, so nothing above sees it
     for e in events:
         obj = e.involved_object
         if not obj or e.reason != "FailedCreate" or obj.kind not in ("ReplicaSet", "StatefulSet", "DaemonSet", "Job"):
@@ -665,7 +664,7 @@ def find_incidents(pods_by_ns: dict, nodes: list, prev_restarts: dict, now: date
         add(obj.namespace or "", _owner_workload(obj.kind, obj.name), "CannotCreatePods", None,
             f"{obj.kind}/{obj.name}: {(e.message or '')[:500]}")
 
-    # Failed Jobs (BackoffLimitExceeded, DeadlineExceeded); a CronJob counts by its newest run
+    # failed Jobs (BackoffLimitExceeded, DeadlineExceeded). For a CronJob only the newest run counts
     for j, cron in _latest_jobs(list(jobs)):
         failed = next((c for c in (j.status.conditions or []) if c.type == "Failed" and c.status == "True"), None)
         if failed:
@@ -677,10 +676,10 @@ def find_incidents(pods_by_ns: dict, nodes: list, prev_restarts: dict, now: date
 
 
 def detect_incidents(prev_restarts: dict, recent_seconds: float = 180, pending_grace_minutes: float = 5):
-    """Read pods in the allowlisted namespaces (all namespaces with "*"), nodes, FailedCreate
-    events and Jobs, and return (incidents, restart counts, unchecked) via find_incidents.
-    `unchecked` names what couldn't be read this time ("pods:<ns>", "pods:*", "nodes", "events",
-    "jobs"), so the watcher doesn't mistake an API error for a resolved incident."""
+    """Read pods, nodes, FailedCreate events and Jobs and hand them to find_incidents.
+    Returns (incidents, restart counts, unchecked). unchecked says what couldn't be read this
+    time ("pods:<ns>", "pods:*", "nodes", "events", "jobs"), otherwise the watcher would take
+    an API error for a resolved incident."""
     unchecked: set = set()
     pods_by_ns = pods_by_namespace(unchecked)
     try:
@@ -698,7 +697,7 @@ def detect_incidents(prev_restarts: dict, recent_seconds: float = 180, pending_g
 
 
 def _in_watched(list_all, list_one, label: str, unchecked: set, **kwargs) -> list:
-    """Items from every watched namespace; on failure the label goes into `unchecked`."""
+    """List across the watched namespaces. On failure the label goes into `unchecked`."""
     kwargs["_request_timeout"] = K8S_TIMEOUT
     try:
         if "*" in ALLOWED:

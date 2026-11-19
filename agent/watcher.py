@@ -1,21 +1,19 @@
-"""Background watcher: finds incidents in the cluster and sends Teams alerts.
+"""Background watcher: scans the cluster and sends Teams alerts.
 
-Every WATCH_INTERVAL_SECONDS it calls tools.detect_incidents and compares the result
-with the incidents it already knows about:
+Every WATCH_INTERVAL_SECONDS it runs tools.detect_incidents and compares with what it
+already knows:
 
-* new incident      -> RCA (AI model while under MAX_LLM_RCA_PER_HOUR, else rules) -> alert card
-* still open        -> a short reminder every ALERT_COOLDOWN_MINUTES
-* gone for RESOLVE_AFTER_MINUTES -> "Resolved" card (the delay stops a crash-looping
-  pod, which looks healthy between restarts, from flapping between open and resolved)
-* first scan after start -> one summary card instead of one alert per ongoing incident,
-  so restarts and upgrades of the agent don't flood the chat.
+  new incident   -> RCA (AI while under MAX_LLM_RCA_PER_HOUR, otherwise rules) + alert card
+  still open     -> short reminder every ALERT_COOLDOWN_MINUTES
+  gone for RESOLVE_AFTER_MINUTES -> "Resolved" card. The delay is needed because a
+                    crash-looping pod looks healthy between restarts.
+  first scan     -> one summary card, so restarting the agent doesn't flood the chat
 
-The scan itself only reads the cluster and updates this bookkeeping. RCAs and Teams posts run
-one at a time on a separate worker, so a slow AI model or a Teams outage never delays the
-next scan. Cards no Teams target accepted are retried on later scans. When part of the cluster
-couldn't be read, incidents there are kept open instead of being reported as resolved.
+RCAs and Teams posts run on a single worker thread, a slow model or a Teams outage must
+not hold up the next scan. Cards that no target accepted are retried on later scans.
+If part of the cluster couldn't be read, incidents there stay open.
 
-State is kept in memory only, so the agent never writes to the cluster.
+State is in memory only.
 """
 import logging
 import os
@@ -31,8 +29,8 @@ import tools
 
 logger = logging.getLogger("kubesupport.watcher")
 
-MAX_AI_BACKLOG = 5      # new incidents waiting for an AI RCA beyond this get a rule-based RCA right away
-OUTBOX_SIZE = 50        # cards kept for a retry while Teams is unreachable
+MAX_AI_BACKLOG = 5      # more than this waiting for the AI and new incidents get the rules instead
+OUTBOX_SIZE = 50        # unsent cards kept for retry
 
 
 def _env_float(name: str, default: float) -> float:
@@ -55,7 +53,7 @@ class Watcher:
         self._rca = rca or self._default_rca
         self._notify = notify or teams.post_alert
         self._clock = clock
-        # background=True (in the pod): RCAs and posts on one worker thread; tests run them inline
+        # worker thread in the pod, tests run everything inline
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="alerts") if background else None
         self.open: dict[str, dict] = {}       # key -> {"incident", "first_seen", "last_seen", "last_alerted"}
         self.restarts: dict[str, int] = {}
@@ -83,7 +81,7 @@ class Watcher:
             background=True,
         )
 
-    # ─── RCA with an hourly AI-model budget ─────────────────────────────────
+    # --- RCA, with an hourly AI budget ---
     def _llm_budget_left(self, now: float) -> bool:
         while self._llm_calls and now - self._llm_calls[0] > 3600:
             self._llm_calls.popleft()
@@ -106,9 +104,9 @@ class Watcher:
             logger.warning("RCA for %s failed: %s", incident["key"], e)
             return None
 
-    # ─── Sending ────────────────────────────────────────────────────────────
+    # --- sending ---
     def _send(self, card: dict):
-        """Post a card; keep it for a later retry when no Teams target accepted it."""
+        """Post a card. If no target took it, park it in the outbox."""
         try:
             results = self._notify(card)
         except Exception as e:
@@ -140,10 +138,10 @@ class Watcher:
                 logger.exception("Sending an alert failed")
         self._worker.submit(safe)
 
-    # ─── One scan ───────────────────────────────────────────────────────────
+    # --- one scan ---
     @staticmethod
     def _unverified(incident: dict, unchecked: set) -> bool:
-        """True when this scan couldn't look at the incident's part of the cluster."""
+        """Could this scan not read the part of the cluster the incident is in?"""
         reason = incident.get("reason")
         if reason == "NodeNotReady":
             return "nodes" in unchecked
@@ -187,7 +185,7 @@ class Watcher:
                 if key in found:
                     continue
                 if self._unverified(entry["incident"], unchecked):
-                    entry["last_seen"] = now  # couldn't look: keep it open rather than call it resolved
+                    entry["last_seen"] = now  # couldn't check it, so don't call it resolved
                     continue
                 if now - entry["last_seen"] >= self.resolve_after:
                     resolved.append((entry["incident"], int((now - entry["first_seen"]) // 60)))
@@ -206,7 +204,7 @@ class Watcher:
             logger.info("Resolved incident %s", inc["key"])
             self._submit(self._send, cards.resolved_card(inc, minutes))
 
-    # ─── Thread control ─────────────────────────────────────────────────────
+    # --- thread ---
     def run(self):
         self.running = True
         self.run_started = self._clock()
@@ -214,7 +212,7 @@ class Watcher:
             try:
                 self.tick()
                 self.last_error = None
-            except Exception as e:  # keep watching even if one scan fails
+            except Exception as e:  # one bad scan shouldn't stop the loop
                 self.last_error = f"{type(e).__name__}: {e}"
                 logger.exception("Watcher tick failed")
             self._stop.wait(self.interval)
@@ -231,7 +229,7 @@ class Watcher:
         self._stop.set()
 
     def healthy(self) -> tuple[bool, str]:
-        """Liveness: False when the scan loop has stopped making progress (e.g. a hung API call)."""
+        """For /healthz. False when scans stopped completing (hung API call and the like)."""
         if not self._thread:
             return True, "watcher not started"
         if not self._thread.is_alive() and not self._stop.is_set():
@@ -243,7 +241,7 @@ class Watcher:
         return True, "ok"
 
     def current_incidents(self) -> list | None:
-        """Open incidents, or None when the watcher isn't running (callers then scan live)."""
+        """Open incidents, or None when the watcher isn't running."""
         if not self.running or not self.started:
             return None
         with self._lock:

@@ -128,7 +128,7 @@ def test_trim_history_keeps_valid_start_and_drops_thinking():
                    for m in trimmed)
 
 
-# ─── RCA checks for models without a strict schema ───────────────────────────
+# --- RCA checks for models without a strict schema ---
 
 def test_normalize_fills_missing_and_fixes_values():
     rca = agent.normalize_rca({"title": "Web down", "root_cause": "bad config", "severity": "sev 2",

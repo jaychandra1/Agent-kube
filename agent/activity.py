@@ -1,13 +1,10 @@
-"""Cluster activity notices: who did what in the cluster, sent to Teams once a minute.
+"""Cluster activity feed: who did what, batched into one Teams card per minute.
 
-The Kubernetes API server calls POST /admission (HTTPS, port 8443) for the requests listed in
-deploy/activity-webhook.yaml: exec/attach/port-forward into pods; created or deleted services,
-apps, jobs, namespaces; RBAC, ServiceAccount, Secret and ConfigMap changes; workload image
-changes and scaling. kubesupport ALWAYS answers "allowed" straight away and only records a
-short event; with failurePolicy: Ignore, nothing is ever blocked, even when kubesupport is down.
+The API server calls POST /admission (HTTPS, 8443) for the requests matched in
+deploy/activity-webhook.yaml. We always answer "allowed" and only keep a short event, so
+nothing is ever blocked (failurePolicy is Ignore as well, in case we're down).
 
-For Secrets and ConfigMaps only the name is kept: the rest of the object, which Kubernetes
-includes in the request, is never stored, logged or sent anywhere.
+For Secrets and ConfigMaps only the name is kept, never the object body.
 """
 import logging
 import os
@@ -46,9 +43,8 @@ IGNORE_NAMESPACES = set(_list(os.getenv("ACTIVITY_IGNORE_NAMESPACES", "kube-node
 TLS_DIR = os.getenv("WEBHOOK_TLS_DIR", "/etc/kubesupport/webhook-tls")
 TARGETS = teams.parse_targets(os.getenv("TEAMS_ACTIVITY_WEBHOOK_URLS", ""), "activity") or teams.ALERT_TARGETS
 MAX_CARD_LINES = 30
-MAX_PENDING = 2000      # events held between two cards; more are counted but dropped (protects memory)
-# Why the HTTPS server on 8443 isn't running, if it was meant to (set by main.py)
-SERVER_ERROR = None
+MAX_PENDING = 2000      # cap between two cards, anything above is counted and dropped
+SERVER_ERROR = None     # set by main.py if the 8443 server didn't come up
 
 CONNECT_ACTIONS = {"exec": "exec", "attach": "attach", "portforward": "port-forward"}
 RBAC = {"roles", "rolebindings", "clusterroles", "clusterrolebindings"}
@@ -60,12 +56,12 @@ CATEGORY_TITLES = [("exec", "Exec / attach / port-forward into pods"), ("securit
 
 
 def tls_files() -> tuple[str, str] | None:
-    """(certificate, key) mounted from Secret kubesupport-webhook-tls, or None."""
+    """Cert and key paths from the kubesupport-webhook-tls mount, None if they aren't there."""
     cert, key = os.path.join(TLS_DIR, "tls.crt"), os.path.join(TLS_DIR, "tls.key")
     return (cert, key) if os.path.isfile(cert) and os.path.isfile(key) else None
 
 
-# ─── Turning an AdmissionReview into a short event ─────────────────────────
+# --- AdmissionReview -> event ---
 
 def _name_of(obj) -> str:
     return ((obj or {}).get("metadata") or {}).get("name") or ""
@@ -78,7 +74,7 @@ def _images(obj) -> dict:
 
 
 def _workload_changes(old, new) -> list[str]:
-    """Image and replica changes between two versions of a Deployment/StatefulSet/DaemonSet."""
+    """Image / replica diff between the old and new workload."""
     changes = []
     old_images, new_images = _images(old), _images(new)
     for container, image in new_images.items():
@@ -93,8 +89,8 @@ def _workload_changes(old, new) -> list[str]:
 
 
 def parse_admission(review: dict) -> dict | None:
-    """The event worth reporting in one AdmissionReview, or None (filtered or not interesting).
-    Only names, users and small details are copied out; object bodies are never kept."""
+    """Event for one AdmissionReview, or None if it's filtered or not worth reporting.
+    Only names and the user are copied out, never the object body."""
     req = review.get("request") or {}
     if req.get("dryRun"):
         return None
@@ -135,7 +131,7 @@ def parse_admission(review: dict) -> dict | None:
         if resource in WORKLOADS:
             changes = _workload_changes(req.get("oldObject"), req.get("object"))
             if not changes:
-                return None  # e.g. a restart annotation or a no-op apply
+                return None  # restart annotation, no-op apply, ...
             event.update(category="update", action="updated", kind=kind, detail="; ".join(changes)[:400])
             return event
         if resource in RBAC:
@@ -151,7 +147,7 @@ def parse_admission(review: dict) -> dict | None:
 
 
 def describe(event: dict) -> str:
-    """One line for Teams, e.g. 'alice@corp exec into pod payments/api-1 (container app): sh'."""
+    """One line for the card, like 'alice@corp exec into pod payments/api-1 (container app): sh'"""
     where = f"{event['namespace']}/{event['name']}" if event.get("namespace") else event.get("name", "")
     who = event.get("user", "unknown")
     if event["category"] == "exec":
@@ -168,7 +164,7 @@ def describe(event: dict) -> str:
     return f"{event['action'].capitalize()} {event['kind']} {where} by {who}"
 
 
-# ─── Collecting events and sending one card per batch ──────────────────────
+# --- batching ---
 
 class ActivityFeed:
     def __init__(self, batch_seconds=BATCH_SECONDS, notify=None, clock=time.time):
@@ -201,7 +197,7 @@ class ActivityFeed:
             self.pending.append(event)
 
     def flush(self) -> dict | None:
-        """Send everything collected since the last flush as one card (None when there was nothing)."""
+        """Send what was collected since the last flush as one card."""
         with self._lock:
             events, self.pending = self.pending, []
         if not events:
@@ -224,7 +220,7 @@ class ActivityFeed:
                 self.flush()
             except Exception:
                 logger.exception("Sending the activity card failed")
-        self.flush()  # don't lose what was collected when shutting down
+        self.flush()  # last batch before shutdown
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -234,7 +230,6 @@ class ActivityFeed:
         self._thread.start()
 
     def stop(self, wait_seconds: float = 10.0):
-        """Stop, and wait briefly for the last card to be sent."""
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=wait_seconds)
@@ -263,14 +258,14 @@ class ActivityFeed:
 FEED = ActivityFeed()
 
 
-# ─── The HTTPS app the API server calls (port 8443) ────────────────────────
+# --- webhook app (8443) ---
 
 webhook_app = FastAPI(title="kubesupport activity webhook", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @webhook_app.post("/admission")
 async def admission(request: Request):
-    """Record the request (maybe) and always allow it."""
+    """Always allows. Records the request if it's one we report."""
     uid = ""
     try:
         review = await request.json()
@@ -279,7 +274,7 @@ async def admission(request: Request):
         event = parse_admission(review)
         if event:
             FEED.record(event)
-    except Exception as e:  # never fail an API request because of kubesupport
+    except Exception as e:  # we must never be the reason an API request fails
         logger.warning("Could not read an admission request: %s", type(e).__name__)
     return JSONResponse({"apiVersion": "admission.k8s.io/v1", "kind": "AdmissionReview",
                          "response": {"uid": uid, "allowed": True}})

@@ -1,4 +1,4 @@
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 # OPTIONAL: only needed to ask kubesupport questions from a Teams channel.
 # Alerts and activity notices work without it.
 #
@@ -13,7 +13,7 @@
 #   2. store the tunnel token in the cluster:
 #      kubectl -n kubesupport create secret generic kubesupport-tunnel --from-literal=TUNNEL_TOKEN='<token>'
 # Then: kubectl apply -f deploy/cloudflare-tunnel.yaml
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -1,10 +1,11 @@
-"""Investigation engine: answers questions and writes root cause analyses (RCAs).
+"""Investigation engine: answers questions and writes RCAs.
 
-With an AI provider (LLM_PROVIDER, see providers/), the model investigates with kubesupport's
-read-only tools and finishes by calling submit_rca. Two provider shapes are driven here:
-  chat providers  (Claude, Groq, Gemini, OpenAI, ...): this module runs the tool loop;
-  agent providers (Cursor): the provider runs the loop and calls the tools back.
-Without a provider, or when the model path fails, a rule-based analyzer writes the RCA."""
+With an AI provider (LLM_PROVIDER, see providers/) the model investigates with our read-only
+tools and finishes by calling submit_rca. Two provider shapes are driven from here:
+  chat providers  (Claude, Groq, Gemini, OpenAI, ...) - the tool loop runs in this module
+  agent providers (Cursor) - the provider runs the loop and calls the tools back
+Without a provider, or when the model path fails, rules.py writes the RCA.
+"""
 import logging
 import os
 import time
@@ -17,7 +18,7 @@ from tools import TOOL_SCHEMAS, call_tool, scan_cluster_for_issues, watched_name
 
 logger = logging.getLogger("kubesupport.agent")
 
-llm, LLM_STATUS = load_provider()   # the provider chosen by LLM_PROVIDER, or None (rules only)
+llm, LLM_STATUS = load_provider()   # llm is None when we run on rules only
 if llm:
     logger.info("AI model: %s", LLM_STATUS)
 elif LLM_STATUS.startswith("LLM_PROVIDER is not set"):
@@ -25,7 +26,7 @@ elif LLM_STATUS.startswith("LLM_PROVIDER is not set"):
 else:
     logger.warning("No AI model: %s. Running with the built-in rules only.", LLM_STATUS)
 
-try:  # longest an answer or RCA may take before the built-in rules take over
+try:  # max seconds for an answer or RCA, after that the rules take over
     DEADLINE_SECONDS = float(os.getenv("LLM_DEADLINE_SECONDS", "") or 300)
 except ValueError:
     DEADLINE_SECONDS = 300.0
@@ -45,14 +46,14 @@ def _check(deadline: float):
 
 CLUSTER_NAME = os.getenv("CLUSTER_NAME", "").strip()
 
-try:  # words an answer may have outside tables and code blocks; 0 = no limit and no shortening pass
+try:  # max words outside tables and code blocks. 0 = no limit, no shortening pass
     ANSWER_MAX_WORDS = max(0, int(os.getenv("ANSWER_MAX_WORDS", "") or 80))
 except ValueError:
     ANSWER_MAX_WORDS = 80
 _LENGTH_RULE = (f"Keep everything outside the table under {ANSWER_MAX_WORDS} words." if ANSWER_MAX_WORDS
                 else "Keep everything outside the table as short as the facts allow.")
 
-# The rules every AI provider works under. Keep them in step with docs/RULES.md (section 3).
+# System prompt for every provider. If you change a rule, update docs/RULES.md section 3 too.
 SYSTEM = f"""You are kubesupport, a read-only support assistant running inside the Kubernetes cluster \
 {f'"{CLUSTER_NAME}"' if CLUSTER_NAME else "you are connected to"}. It is the only cluster you can see, so every question
 about pods, services, ingresses, nodes or anything else is about this cluster: never ask which cluster is meant.
@@ -118,8 +119,8 @@ Example of rule 11, for the question "which pods are failing in payments?":
 
 **Next:** ask `rca payments/api-7d9f8b-x` for the cause."""
 
-# Rule 13 is given only to conversations that come from Teams (boundaries.restricted_access):
-# the watcher must still be able to diagnose a failure in kubesupport's own namespace.
+# Rule 13 only goes into conversations from Teams (boundaries.restricted_access). The
+# watcher still has to be able to diagnose a failure in our own namespace.
 BOUNDARY_RULE = f"""
 13. Boundaries. You never discuss kubesupport itself: how it was built, installed, deployed, hosted, configured,
     secured or connected to Teams; its code, image, settings, namespace, pods, logs, permissions, keys, tokens,
@@ -137,7 +138,7 @@ SYSTEM_RESTRICTED = SYSTEM.replace(_EXAMPLE_MARK, BOUNDARY_RULE + _EXAMPLE_MARK,
 
 
 def _system() -> str:
-    """The rules for this request: with the boundaries rule when it comes from Teams."""
+    """System prompt for the current request, with rule 13 when it comes from Teams."""
     return SYSTEM_RESTRICTED if boundaries.is_restricted() else SYSTEM
 
 
@@ -145,8 +146,8 @@ RCA_TOOL = {
     "name": "submit_rca",
     "description": ("Submit the final root cause analysis. Every field must be supported by tool output; "
                     "say what is unknown instead of guessing."),
-    # strict: the API guarantees the tool input matches this schema exactly,
-    # so the report template always gets every field it renders.
+    # strict: the API guarantees the input matches the schema, so the report template
+    # always gets every field it renders
     "strict": True,
     "input_schema": {
         "type": "object",
@@ -215,7 +216,6 @@ def _limits():
 
 
 def _create(messages, tools, require_tool: str | None = None):
-    """One model call through the chat provider (see providers/base.py)."""
     return llm.create(_system(), messages, tools, require_tool=require_tool)
 
 
@@ -224,20 +224,20 @@ def _text(resp) -> str:
 
 
 def _run_tool(name: str, args: dict, restricted: bool | None = None) -> str:
-    """`restricted`: pass it when the call runs in another thread than the request (Cursor calls
-    the tools back from its own threads); None takes it from the current thread."""
+    """Pass restricted explicitly when the call runs on another thread than the request
+    (Cursor calls the tools from its own threads). None takes it from the current thread."""
     return call_tool(name, args, _limits().tool_chars,
                      boundaries.is_restricted() if restricted is None else restricted)
 
 
 def _tool_results(resp) -> list:
-    """Run every tool the model asked for; all results go back in one user message."""
+    """Run all tools the model asked for. The results go back in one user message."""
     return [{"type": "tool_result", "tool_use_id": b.id, "content": _run_tool(b.name, b.input)}
             for b in resp.content if b.type == "tool_use"]
 
 
 def run_loop(messages, max_steps: int | None = None) -> str:
-    """Chat providers: call the model, run the tools it asks for, repeat until it answers."""
+    """Tool loop for chat providers: call the model, run its tools, repeat until it answers."""
     if not llm:
         return NO_MODEL
     deadline = _deadline()
@@ -256,7 +256,7 @@ def run_loop(messages, max_steps: int | None = None) -> str:
 
 
 def _transcript(messages, keep: int = 6) -> str:
-    """The plain-text part of the last `keep` turns, for providers that take one message."""
+    """Text of the last few turns, for providers that only take a single message."""
     lines = []
     for m in messages[-keep:]:
         content = m["content"]
@@ -281,7 +281,7 @@ SHORTEN_NUDGE = ("That answer is too long to read at a glance in a chat. Rewrite
 
 
 def prose_words(text: str) -> int:
-    """Words outside Markdown tables and code blocks: the part a person has to read."""
+    """Word count without tables and code blocks, i.e. what someone actually has to read."""
     count, in_code = 0, False
     for line in (text or "").splitlines():
         stripped = line.strip()
@@ -293,7 +293,7 @@ def prose_words(text: str) -> int:
 
 
 def _too_long(answer: str) -> bool:
-    """Clearly over the limit (by half again): worth one extra model call to shorten."""
+    """More than 1.5x the limit. Below that a second model call isn't worth it."""
     return ANSWER_MAX_WORDS > 0 and prose_words(answer) > ANSWER_MAX_WORDS * 1.5
 
 
@@ -302,7 +302,7 @@ def _shorter(candidate: str, original: str) -> bool:
 
 
 def _shorten(messages, answer: str) -> str:
-    """Chat providers: ask once for the compact format. The conversation keeps only the result."""
+    """Ask once for a shorter version (chat providers). Only the result stays in the history."""
     messages.append({"role": "user", "content": SHORTEN_NUDGE})
     try:
         resp = _create(messages, TOOL_SCHEMAS)
@@ -310,7 +310,7 @@ def _shorten(messages, answer: str) -> str:
     except Exception as e:
         logger.info("Could not shorten the answer: %s", type(e).__name__)
         short = ""
-    messages.pop()  # the request to shorten isn't part of the conversation
+    messages.pop()  # the nudge isn't part of the conversation
     if not _shorter(short, answer):
         return answer
     messages[-1] = {"role": "assistant", "content": [{"type": "text", "text": short}]}
@@ -318,9 +318,9 @@ def _shorten(messages, answer: str) -> str:
 
 
 def _agent_chat(messages, user_text) -> str:
-    """Agent providers (Cursor): one message carrying the recent conversation and the question.
-    If the agent answers with kubectl instructions without having used a single tool, it is told
-    once to look the answer up; a clearly over-long answer is sent back once to be shortened."""
+    """Chat for agent providers (Cursor): one message with the recent conversation and the
+    question. If it answers with kubectl instructions without using a single tool it gets one
+    nudge to go and look, and a way too long answer is sent back once."""
     earlier = _transcript(messages)
     prompt = f"Conversation so far:\n{earlier}\n\nNew question: {user_text}" if earlier else user_text
     used = []
@@ -340,7 +340,7 @@ def _agent_chat(messages, user_text) -> str:
         if _too_long(answer):
             try:
                 short = session.send(SHORTEN_NUDGE)
-            except Exception as e:  # keep the long answer rather than lose it
+            except Exception as e:  # better a long answer than none
                 logger.info("Could not shorten the answer: %s", type(e).__name__)
                 short = ""
             if _shorter(short, answer):
@@ -372,7 +372,7 @@ def _block_type(block):
 
 
 def _is_plain_user_turn(msg) -> bool:
-    """A user message that carries no tool_result, i.e. a safe place to start a history."""
+    """User message without tool_result blocks, a safe place to start a history."""
     if msg["role"] != "user":
         return False
     content = msg["content"]
@@ -380,12 +380,11 @@ def _is_plain_user_turn(msg) -> bool:
 
 
 def trim_history(messages: list, keep: int = 20) -> list:
-    """Shorten a chat history to about `keep` messages without breaking API rules.
+    """Cut a chat history down to about `keep` messages.
 
-    The cut is placed at a plain user turn, so no tool_result loses its tool_use.
-    Every thinking block is removed from what is kept: a thinking block's
-    signature covers the history before it, which trimming changes, and the API
-    rejects such blocks. Removing all of them is allowed."""
+    The cut has to land on a plain user turn, otherwise a tool_result loses its tool_use.
+    Thinking blocks are removed from what is kept: their signature covers the history
+    before them, which we just changed, and the API rejects such blocks."""
     if len(messages) <= keep:
         return messages
     starts = [i for i, m in enumerate(messages) if i > 0 and _is_plain_user_turn(m)]
@@ -406,8 +405,8 @@ def trim_history(messages: list, keep: int = 20) -> list:
 
 def generate_heuristic_rca(namespace: str | None = None, pod: str | None = None,
                            incident: dict | None = None) -> dict:
-    """Rule-based RCA (rules.py): for a pod, for an incident without a pod, or for the first
-    unhealthy pod in the watched namespaces."""
+    """RCA from rules.py: for a pod, for an incident without a pod, or for the first
+    unhealthy pod the scan finds."""
     return rules.diagnose(namespace=namespace, pod=pod, incident=incident)
 
 
@@ -421,8 +420,8 @@ SEVERITIES = ("SEV1", "SEV2", "SEV3", "SEV4")
 
 
 def normalize_rca(data) -> dict:
-    """Check and complete a submitted RCA. Claude's strict tool schema already guarantees
-    the shape; other models may leave fields out or use other spellings."""
+    """Validate and fill in a submitted RCA. Claude's strict schema already guarantees the
+    shape, other models leave fields out or spell things differently."""
     if not isinstance(data, dict):
         raise ValueError("submit_rca input is not an object")
     rca = dict(data)
@@ -446,11 +445,11 @@ def normalize_rca(data) -> dict:
 
 
 def _llm_rca(question: str) -> dict:
-    """Chat providers: tool-use loop that ends when the model calls submit_rca.
+    """Tool loop for chat providers, ends when the model calls submit_rca.
 
     Current Claude models reject a forced tool_choice, so the prompt asks for submit_rca and
-    the loop reminds the model when it stops without calling it or is about to run out of
-    steps. After a reminder, OpenAI-compatible providers are also told to call it."""
+    we nudge when the model stops without it or is about to run out of steps. After a nudge
+    the OpenAI-compatible providers get the tool forced as well."""
     steps = _limits().steps
     tools = [*TOOL_SCHEMAS, RCA_TOOL]
     messages = [{"role": "user", "content": f"{question}\n\n{RCA_INSTRUCTIONS}"}]
@@ -479,13 +478,13 @@ def _llm_rca(question: str) -> dict:
 
 
 def _refused(reply: str):
-    """An RCA request from Teams that the model answered with the refusal sentence (rule 13)."""
+    """The model answered an RCA request from Teams with the refusal sentence (rule 13)."""
     if boundaries.is_restricted() and boundaries.is_refusal(reply):
         raise boundaries.RestrictedAccess(boundaries.REASON_AI, stopped_by="AI rule")
 
 
 def _agent_rca(question: str) -> dict:
-    """Agent providers (Cursor): the provider runs the loop; submit_rca is one of its tools."""
+    """RCA for agent providers (Cursor). submit_rca is just one more tool for the agent."""
     submitted, used = {}, []
     restricted = boundaries.is_restricted()
 
@@ -507,19 +506,18 @@ def _agent_rca(question: str) -> dict:
             reply = session.send(RCA_NUDGE)
     if "rca" not in submitted:
         raise RuntimeError("the agent finished without calling submit_rca")
-    if not used:  # rule 1: an RCA that never looked at the cluster is a guess
+    if not used:  # never looked at the cluster, so it is a guess (rule 1)
         raise RuntimeError("the agent submitted an RCA without reading the cluster (no tool was called)")
     return normalize_rca(submitted["rca"])
 
 
 def investigate_and_rca(question: str, target: dict | None = None, use_llm: bool = True) -> dict:
-    """Run the AI-model investigation, or fall back to the heuristic analyzer.
+    """Run the AI investigation, or fall back to the rules.
 
-    `target` ({"namespace", "pod", "workload", "reason", "detail"}, e.g. a watcher incident)
-    points both engines at one pod, or at a workload or node when the incident has no pod.
-    `use_llm=False` forces the rules (the watcher's hourly model budget). The result says which
-    engine produced it ("generated_by"), and carries the reason in "llm_error" when the model
-    path failed."""
+    target ({"namespace", "pod", "workload", "reason", "detail"}, usually a watcher incident)
+    points both engines at one pod, or at a workload or node when there is no pod.
+    use_llm=False forces the rules (the watcher's hourly budget). The result says who wrote
+    it in "generated_by" and has the reason in "llm_error" when the model path failed."""
     llm_error = None
     if llm and use_llm:
         try:
@@ -537,7 +535,7 @@ def investigate_and_rca(question: str, target: dict | None = None, use_llm: bool
             rca["generated_by"] = f"llm:{llm.name}:{llm.model}"
             return rca
         except boundaries.RestrictedAccess:
-            raise  # a question about kubesupport itself: refused, never answered by the rules instead
+            raise  # refused question, the rules must not answer it instead
         except Exception as e:
             llm_error = f"{type(e).__name__}: {e}"
             logger.warning("LLM investigation failed (%s). Falling back to the built-in rules.", llm_error)

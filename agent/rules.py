@@ -1,14 +1,14 @@
-"""Built-in diagnosis rules: a root cause analysis (RCA) from Kubernetes evidence alone.
+"""Built-in diagnosis rules: an RCA from Kubernetes evidence alone.
 
-Used when no AI provider is configured, when the hourly AI budget is used up, or when the
-model fails. The rules only state what the evidence shows: they quote the waiting or
-termination reason, the exit code, event messages and log lines they relied on.
+Used when there is no AI provider, when the hourly AI budget is spent, or when the model
+fails. The rules only say what the evidence shows, and quote what they relied on: the
+waiting or termination reason, the exit code, event messages, log lines.
 
-Confidence says how direct that evidence is:
+Confidence = how direct that evidence is:
   high    a Kubernetes reason or event message names the cause
-  medium  the cause is inferred from logs or an exit code
-  low     no specific signal was found; a generic diagnosis
-Severity comes from the workload's state when it can be read:
+  medium  inferred from logs or an exit code
+  low     nothing specific found, generic diagnosis
+Severity comes from the workload's state, where we can read it:
   SEV1  no replica of the workload is ready (or no pod can be created)
   SEV2  some replicas are not ready, or a node is down
   SEV3  the pod recovered or the problem is contained (failed job, evicted pod replaced)
@@ -75,7 +75,7 @@ class PodFacts:
         return [line for line in self.logs.splitlines() if rx.search(line)][-3:]
 
 
-# ─── Entry point ─────────────────────────────────────────────────────────────
+# --- Entry point ---
 
 def diagnose(namespace: str | None = None, pod: str | None = None, incident: dict | None = None) -> dict:
     """RCA for one pod, for an incident without a pod (node, job, pods that can't be
@@ -97,7 +97,7 @@ def diagnose(namespace: str | None = None, pod: str | None = None, incident: dic
                 stakeholder="All checked workloads are running normally.")
 
 
-# ─── Pods ────────────────────────────────────────────────────────────────────
+# --- Pods ---
 
 def _facts(namespace: str, pod: str) -> PodFacts:
     desc = describe_pod(namespace, pod)
@@ -105,7 +105,7 @@ def _facts(namespace: str, pod: str) -> PodFacts:
                  status_reason=desc.get("reason") or "", status_message=desc.get("message") or "",
                  node=desc.get("node") or "", conditions=desc.get("conditions") or [])
     containers = (desc.get("init_containers") or []) + (desc.get("containers") or [])
-    # The container to explain: one that is waiting, else one that terminated, else the first
+    # which container to explain: a waiting one, else one that terminated, else the first
     chosen = (next((c for c in containers if (c.get("state") or {}).get("waiting")), None)
               or next((c for c in containers if c.get("last_terminated")), None)
               or (containers[0] if containers else None))
@@ -377,16 +377,16 @@ def _evicted(f: PodFacts) -> Finding | None:
 
 
 def _exit_code_program(f: PodFacts) -> Finding | None:
-    """126/127/139 say what is wrong with the program itself: checked before the log patterns."""
+    """126/127/139 say what is wrong with the program itself, so they go before the log patterns."""
     return _exit_code(f, codes=(126, 127, 139))
 
 
 def _exit_code_signal(f: PodFacts) -> Finding | None:
-    """137/143 only say the process was killed or stopped: checked after the log patterns."""
+    """137/143 only say the process was killed or stopped, so they come after the log patterns."""
     return _exit_code(f, codes=(137, 143))
 
 
-# First match wins: the most specific evidence first
+# first match wins, most specific evidence first
 POD_RULES = [_image_pull, _config_error, _scheduling, _volume, _evicted, _oom, _liveness, _exit_code_program,
              _logs_pattern, _exit_code_signal, _readiness, _crash]
 
@@ -430,7 +430,7 @@ def _pod_rca(namespace: str, pod: str, workload: str | None) -> dict:
 
 
 def _impact(namespace: str, workload: str | None, pod_ready: bool) -> tuple[str, str]:
-    """(severity, impact sentence), from the Deployment's ready replicas when available."""
+    """Returns (severity, impact sentence), from the Deployment's ready replicas if we can read them."""
     if workload and workload.startswith("Deployment/"):
         try:
             d = get_deployment(namespace, workload.split("/", 1)[1])
@@ -448,7 +448,7 @@ def _impact(namespace: str, workload: str | None, pod_ready: bool) -> tuple[str,
     return "SEV2", "The pod is not ready; check whether other replicas are serving."
 
 
-# ─── Incidents without a pod ─────────────────────────────────────────────────
+# --- Incidents without a pod ---
 
 def _incident_rca(incident: dict) -> dict:
     reason, detail = incident.get("reason", ""), incident.get("detail") or ""
@@ -545,14 +545,14 @@ def _incident_rca(incident: dict) -> dict:
                 timeline=_timeline([], []), factors=[], stakeholder="")
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# --- Helpers ---
 
 def _ev(source: str, excerpt: str) -> dict:
     return {"source": source, "excerpt": (excerpt or "").strip()[:800]}
 
 
 def _timeline(events: list, extra: list) -> list:
-    """Real times from the evidence (oldest first), then the time of this diagnosis."""
+    """Times from the evidence, oldest first, then the time of this diagnosis."""
     items = [(e.get("time"), f"{e.get('reason')}{' x' + str(e['count']) if (e.get('count') or 1) > 1 else ''}: "
               f"{(e.get('message') or '')[:160]}") for e in events[:4]] + list(extra)
     dated = sorted(((timefmt.parse(t), text) for t, text in items if timefmt.parse(t)), key=lambda x: x[0])

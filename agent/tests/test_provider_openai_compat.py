@@ -14,7 +14,7 @@ from providers.catalog import FREE_TIER, STANDARD
 from providers.openai_compat import OpenAICompatibleProvider, fit_budget, from_openai_response, to_openai_messages
 
 
-# ─── History conversion ──────────────────────────────────────────────────────
+# --- History conversion ---
 
 def test_history_converts_to_chat_completions_messages():
     history = [
@@ -69,7 +69,7 @@ def test_small_request_is_not_changed():
     assert fit_budget(msgs, max_chars=10000) == msgs
 
 
-# ─── Response parsing ────────────────────────────────────────────────────────
+# --- Response parsing ---
 
 def choice(message, finish="stop"):
     return {"choices": [{"message": message, "finish_reason": finish}]}
@@ -96,7 +96,7 @@ def test_finish_reasons_map_to_stop_reasons(finish, stop):
     assert resp.stop_reason == stop and resp.content[0].text == "hello"
 
 
-# ─── HTTP client ─────────────────────────────────────────────────────────────
+# --- HTTP client ---
 
 class FakeHTTP:
     """Stands in for requests.post: returns the scripted replies and records each call."""
@@ -214,7 +214,7 @@ def test_endpoint_is_required():
         OpenAICompatibleProvider("custom", "Custom", "m", STANDARD, base_url="")
 
 
-# ─── A whole investigation through an OpenAI-compatible provider ─────────────
+# --- A whole investigation through an OpenAI-compatible provider ---
 
 def test_full_groq_investigation(monkeypatch):
     """Model asks for a tool, gets the result, then submits the RCA: two HTTP calls."""

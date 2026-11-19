@@ -20,7 +20,7 @@ from test_watcher import INC, INC2, make_watcher, title
 from tools import find_incidents
 
 
-# ─── New incident types ──────────────────────────────────────────────────────
+# --- New incident types ---
 
 def failed_create(name="kubesupport-769bb95cc4", kind="ReplicaSet", ns="kubesupport", minutes_ago=2,
                   reason="FailedCreate"):
@@ -91,7 +91,7 @@ def test_detect_reports_what_it_could_not_read(monkeypatch):
     assert unchecked == {"pods:apps", "nodes", "events"}
 
 
-# ─── Watcher: partial failures, retries, health, AI backlog ──────────────────
+# --- Watcher: partial failures, retries, health, AI backlog ---
 
 def test_unreadable_namespace_does_not_resolve_its_incidents():
     w, state, sent, _, clock = make_watcher()
@@ -144,7 +144,7 @@ def test_ai_backlog_falls_back_to_rules(monkeypatch):
     assert [use_llm for _, use_llm in rca_calls] == [False, False]
 
 
-# ─── Teams: bounded memory and a busy reply ──────────────────────────────────
+# --- Teams: bounded memory and a busy reply ---
 
 def test_sessions_are_bounded(monkeypatch):
     monkeypatch.setattr(teams, "MAX_SESSIONS", 3)
@@ -169,7 +169,7 @@ def test_too_many_waiting_questions_get_a_busy_reply(monkeypatch):
     release.set()
 
 
-# ─── Secrets and input validation ────────────────────────────────────────────
+# --- Secrets and input validation ---
 
 def test_environment_values_are_hidden():
     obj = {"spec": {"template": {"spec": {"containers": [{"name": "app", "env": [
@@ -223,7 +223,7 @@ def test_activity_stop_sends_the_last_card():
     assert len(sent) == 1
 
 
-# ─── Deadline, internal API, health endpoint, supervised servers ─────────────
+# --- Deadline, internal API, health endpoint, supervised servers ---
 
 def test_slow_ai_investigation_falls_back_to_rules(monkeypatch):
     monkeypatch.setattr(agent, "llm", fake_llm())

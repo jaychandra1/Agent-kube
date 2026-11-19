@@ -213,7 +213,7 @@ def test_version_comparison():
     assert pcb.version_tuple("7.0.0-alpha.10") == (7, 0, 0)
 
 
-# ─── Dockerfile ──────────────────────────────────────────────────────────────
+# --- Dockerfile ---
 
 DOCKERFILE = (AGENT_DIR / "Dockerfile").read_text(encoding="utf-8")
 

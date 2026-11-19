@@ -1,13 +1,14 @@
-"""Microsoft Teams integration without a bot registration.
+"""Microsoft Teams integration, without a bot registration.
 
-* Alerts and long answers go OUT through Teams Workflows webhooks (plain HTTPS POSTs
-  of Adaptive Cards; set up in the Teams "Workflows" app). A webhook can post to a chat,
-  a standard channel or a private channel; the agent just needs its URL.
-* Questions come IN through a Teams *outgoing webhook*: a team owner creates it in
-  Teams (Manage team -> Apps -> Create an outgoing webhook). When someone @mentions
-  it in a channel, Teams POSTs the message here, signed with HMAC-SHA256, and shows
-  whatever we return within 5 seconds as the reply. Slow work (AI answers, RCA) is
-  acknowledged at once and the result is posted to the channel's Workflows webhook.
+Out: alerts and long answers are Adaptive Cards POSTed to Teams Workflows webhooks (set up
+in the Workflows app). A webhook can post to a chat, a standard channel or a private
+channel, all we need is its URL.
+
+In: questions arrive through a Teams outgoing webhook (Manage team -> Apps -> Create an
+outgoing webhook). When someone @mentions it, Teams POSTs the message here signed with
+HMAC-SHA256 and shows whatever we return within 5 seconds as the reply. Slow work (AI
+answers, RCA) is acknowledged right away and the result goes to the channel's Workflows
+webhook.
 """
 import base64
 import hashlib
@@ -40,11 +41,11 @@ _NAMED_TARGET = re.compile(r"^([A-Za-z0-9._-]+)=(https?://\S+)$")
 
 
 def parse_targets(value: str, prefix: str) -> list[tuple[str, str]]:
-    """Webhook targets from a comma-separated list; each entry may carry a name.
+    """Webhook targets from a comma separated list, each entry optionally "name=url".
 
     'chat=https://a, https://b' -> [('chat', 'https://a'), ('alert-2', 'https://b')]
-    Names show up in logs and in /alerts/status and /alerts/test results instead of the
-    URLs, which work like passwords."""
+    The names are what shows up in logs, /alerts/status and /alerts/test. The URLs are
+    as good as passwords."""
     targets = []
     for i, entry in enumerate(_split(value), start=1):
         named = _NAMED_TARGET.match(entry)
@@ -55,7 +56,7 @@ def parse_targets(value: str, prefix: str) -> list[tuple[str, str]]:
 ALERT_TARGETS = parse_targets(os.getenv("TEAMS_ALERT_WEBHOOK_URLS", ""), "alert")
 _reply = parse_targets(os.getenv("TEAMS_REPLY_WEBHOOK_URL", ""), "reply")
 REPLY_TARGET = _reply[0] if _reply else (ALERT_TARGETS[0] if ALERT_TARGETS else None)
-# Where "someone asked about kubesupport itself" notices go: their own webhook(s), else the alert targets
+# where the notices about refused questions go, alert targets if not set
 SECURITY_TARGETS = parse_targets(os.getenv("TEAMS_SECURITY_WEBHOOK_URLS", ""), "security") or ALERT_TARGETS
 OUTGOING_SECRET = os.getenv("TEAMS_OUTGOING_WEBHOOK_SECRET", "").strip()
 TENANT_ID = os.getenv("TEAMS_TENANT_ID", "").strip()
@@ -63,30 +64,30 @@ ALLOWED_USER_IDS = {u.lower() for u in _split(os.getenv("TEAMS_ALLOWED_USER_IDS"
 
 QUICK_TIMEOUT_SECONDS = 4.0      # Teams waits 5 s for an outgoing-webhook reply
 MAX_REPLY_CHARS = 3500
-POST_ATTEMPTS = 3                # Workflows throttles >4 requests/s (HTTP 429); retry with backoff
+POST_ATTEMPTS = 3                # Workflows throttles above 4 requests/s (429)
 
-# Quick commands and slow AI work get separate workers, so a few long investigations never
-# make `status` or `pods` miss Teams' 5-second limit.
+# Separate pools: a few long investigations must not make `status` or `pods` miss the
+# 5 second limit.
 _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="teams-quick")
 _slow_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="teams-slow")
-MAX_SLOW_WAITING = 6             # questions/RCAs running or queued; more get a "busy" reply
+MAX_SLOW_WAITING = 6             # running + queued. Above that people get a "busy" reply
 _slow_slots = threading.BoundedSemaphore(MAX_SLOW_WAITING)
-_notify_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="teams-notify")  # notices to administrators
-_seen_ids = deque(maxlen=500)    # Teams can resend the same message; answer once
+_notify_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="teams-notify")  # notices for the admins
+_seen_ids = deque(maxlen=500)    # Teams resends messages sometimes, answer once
 _seen_lock = threading.Lock()
-# AI chat history per channel thread (and per /chat session): bounded in number and age
+# AI chat history per channel thread (and per /chat session), capped in number and age
 MAX_SESSIONS = 200
 SESSION_IDLE_SECONDS = 24 * 3600
 _sessions: "OrderedDict[str, dict]" = OrderedDict()
 _sessions_lock = threading.Lock()
 
 
-# ─── Outbound: Workflows webhooks ───────────────────────────────────────────
+# --- outbound: Workflows webhooks ---
 
 def _post_one(label: str, url: str, payload: dict) -> dict:
-    """POST to one webhook. Retries throttling (429), server errors and network errors.
-    Logs only the target's name and the error type: the URL (and errors that quote it)
-    contains the webhook's signature."""
+    """POST to one webhook, retrying 429s, server errors and network errors.
+    Only the target's name and the error type are logged. The URL holds the webhook's
+    signature and exception messages like to quote it."""
     result = {"target": label, "status": None, "ok": False}
     for attempt in range(1, POST_ATTEMPTS + 1):
         delay = 2 ** attempt
@@ -115,9 +116,9 @@ def _post_one(label: str, url: str, payload: dict) -> dict:
 
 
 def post_card(targets, adaptive_card: dict, thread: dict | None = None) -> list[dict]:
-    """POST a card to each (name, url) target. Never raises; returns one result per target.
-    `thread` (from thread_of) is added to the payload, so a workflow can reply in the thread
-    the question was asked in instead of starting a new post."""
+    """POST a card to each (name, url) target. Never raises, returns one result per target.
+    thread (from thread_of) goes into the payload so the workflow can reply in the thread
+    the question was asked in."""
     if isinstance(targets, tuple):
         targets = [targets]
     payload = {**cards.message(adaptive_card), **(thread or {})}
@@ -131,7 +132,7 @@ def post_alert(adaptive_card: dict) -> list[dict]:
     return post_card(ALERT_TARGETS, adaptive_card)
 
 
-# ─── Inbound: outgoing webhook ──────────────────────────────────────────────
+# --- inbound: outgoing webhook ---
 
 def verify_hmac(raw_body: bytes, auth_header: str | None, secret_b64: str = None) -> bool:
     """Teams signs the body with HMAC-SHA256 using the base64-decoded security token
@@ -160,11 +161,11 @@ _THREAD_ROOT = re.compile(r";messageid=(\d+)")
 
 
 def thread_of(activity: dict) -> dict:
-    """Where a question was asked, sent along with the answer: {"threadMessageId", "channelId"}.
+    """Where a question was asked: {"threadMessageId", "channelId"}. Sent along with the answer.
 
-    In a channel, Teams gives the conversation id as "<channel id>;messageid=<id of the first
-    message of the thread>". A workflow can pass threadMessageId to the Teams action "Reply with
-    an adaptive card in a channel", which puts the answer under the question."""
+    In a channel the conversation id is "<channel id>;messageid=<id of the thread's first
+    message>". The workflow passes threadMessageId to "Reply with an adaptive card in a
+    channel", which puts the answer under the question."""
     conversation = str((activity.get("conversation") or {}).get("id") or "")
     match = _THREAD_ROOT.search(conversation)
     root = match.group(1) if match else (activity.get("replyToId") or activity.get("id"))
@@ -221,7 +222,7 @@ def _status_text() -> str:
     import watcher  # local import: watcher imports this module
     incidents = watcher.WATCHER.current_incidents()
     source = "watcher"
-    if incidents is None:  # watcher not running: detect once
+    if incidents is None:  # watcher not running, scan once
         found, *_ = tools.detect_incidents({})
         incidents, source = list(found.values()), "live scan"
     incidents = [i for i in incidents
@@ -295,8 +296,8 @@ def _activity_text() -> str:
 
 
 def session_for(conv_id: str) -> dict:
-    """{"messages", "lock"} for one conversation. Idle conversations expire after a day, and at
-    most MAX_SESSIONS are kept (least recently used first out)."""
+    """{"messages", "lock"} for one conversation. Idle ones expire after a day and at most
+    MAX_SESSIONS are kept (LRU)."""
     now = time.time()
     with _sessions_lock:
         for key in [k for k, v in _sessions.items() if now - v["used"] > SESSION_IDLE_SECONDS]:
@@ -312,7 +313,7 @@ def session_for(conv_id: str) -> dict:
 def answer_in_session(conv_id: str, question: str) -> str:
     session = session_for(conv_id)
     with session["lock"]:
-        if len(session["messages"]) > 30:  # keep each request small, before and after the call
+        if len(session["messages"]) > 30:  # trim before and after the call
             session["messages"] = agent.trim_history(session["messages"], keep=20)
         answer = agent.chat(session["messages"], question)
         if len(session["messages"]) > 30:
@@ -321,7 +322,7 @@ def answer_in_session(conv_id: str, question: str) -> str:
 
 
 def _submit_slow(fn, *args):
-    """Run slow work on its own workers; None when too much is already waiting."""
+    """Queue slow work. Returns None when too much is waiting already."""
     if not _slow_slots.acquire(blocking=False):
         return None
     future = _slow_pool.submit(fn, *args)
@@ -332,7 +333,7 @@ def _submit_slow(fn, *args):
 def _run_rca(args: list[str]) -> dict:
     if args and "/" in args[0] and len(args) == 1:
         ns, pod = _ns_pod(args[0])
-        tools._ns(ns)  # allowlist check before doing any work
+        tools._ns(ns)  # fail early if we may not read that namespace
         target = {"namespace": ns, "pod": pod, "workload": None, "reason": "requested from Teams", "detail": ""}
         return agent.investigate_and_rca(f"Investigate pod {pod} in namespace {ns} and produce an RCA.", target)
     question = " ".join(args) or "Scan the cluster, diagnose any failing pods and produce an RCA."
@@ -343,17 +344,17 @@ def _reply(text: str) -> dict:
     return {"type": "message", "text": text}
 
 
-# ─── Boundaries: questions about kubesupport itself (see boundaries.py) ──────
+# --- boundaries (see boundaries.py) ---
 
 def _as_teams_user(fn, *args):
-    """Run work for someone in Teams: the tools then refuse kubesupport's own namespace and objects."""
+    """Run fn with the boundaries on: the tools then refuse our own namespace and objects."""
     with boundaries.restricted_access():
         return fn(*args)
 
 
 def report_restricted(sender: dict, question: str, reason: str, stopped_by: str) -> dict:
-    """Keep and log a refused request, and tell the administrators who asked what: a card to
-    TEAMS_SECURITY_WEBHOOK_URLS, or to the alert targets when that is not set."""
+    """Log and keep a refused request, and send the admins a card saying who asked what
+    (to TEAMS_SECURITY_WEBHOOK_URLS, or the alert targets if that isn't set)."""
     event = boundaries.record(sender.get("name"), sender.get("aadObjectId"), tools.redact(question), reason, stopped_by)
     if event["notify"] and SECURITY_TARGETS:
         _notify_pool.submit(post_card, SECURITY_TARGETS, cards.restricted_card(event))
@@ -366,8 +367,8 @@ def _refuse(sender: dict, question: str, reason: str, stopped_by: str) -> dict:
 
 
 def _failure(e: Exception) -> str:
-    """What the person who asked sees when something breaks: the Kubernetes status at most. The raw
-    error can name the AI provider or kubesupport's service account, so it only goes to the log."""
+    """Error text for the person who asked: the Kubernetes status at most. The raw error can
+    name the AI provider or our service account, so that only goes to the log."""
     status = getattr(e, "status", None)
     if status:
         return f"Sorry, that failed: Kubernetes answered {status} {getattr(e, 'reason', None) or ''}".rstrip() + "."
@@ -375,7 +376,7 @@ def _failure(e: Exception) -> str:
 
 
 def _late_quick_result(f, sender: dict, question: str) -> str:
-    """Text for a quick command that finished after Teams' 5-second limit."""
+    """Result of a quick command that missed the 5 second window."""
     e = f.exception()
     if isinstance(e, boundaries.RestrictedAccess):
         report_restricted(sender, question, str(e), e.stopped_by)
@@ -389,13 +390,13 @@ def _late_quick_result(f, sender: dict, question: str) -> str:
 
 
 def _deliver_later(future, sender: dict, question: str, is_rca: bool, thread: dict | None = None):
-    """Post the result of slow work to the channel's Workflows webhook, with the question's thread."""
+    """Post the result of slow work to the reply webhook, in the question's thread."""
     asked_by = sender.get("name")
 
     def done(f):
         try:
             result = f.result()
-            if not is_rca and boundaries.is_refusal(str(result)):  # the AI's own rule: only the refusal is shown
+            if not is_rca and boundaries.is_refusal(str(result)):  # model refused (rule 13), show only that
                 report_restricted(sender, question, boundaries.REASON_AI, "AI rule")
                 result = boundaries.REFUSAL
             card = cards.rca_card(result, asked_by, question) if is_rca else \
@@ -411,7 +412,7 @@ def _deliver_later(future, sender: dict, question: str, is_rca: bool, thread: di
 
 
 def handle_outgoing(activity: dict) -> dict:
-    """Handle one outgoing-webhook message (HMAC already verified). Returns the reply."""
+    """Handle one message from the outgoing webhook (HMAC is already checked). Returns the reply."""
     msg_id = activity.get("id")
     with _seen_lock:
         if msg_id and msg_id in _seen_ids:
@@ -437,7 +438,7 @@ def handle_outgoing(activity: dict) -> dict:
     if cmd == "help":
         return _reply(HELP)
 
-    # Boundaries, layer 1: a question about kubesupport itself is refused and reported before any work
+    # questions about kubesupport itself are refused (and reported) before anything runs
     if cmd in ("ask", "rca"):
         reason = boundaries.restricted_question(text)
         if reason:
@@ -462,15 +463,15 @@ def handle_outgoing(activity: dict) -> dict:
             future.add_done_callback(lambda f: post_card(REPLY_TARGET, cards.answer_card(
                 text, asked_by, _late_quick_result(f, sender, text)), thread))
             return _reply("Still working on it; the result will follow shortly.")
-        except boundaries.RestrictedAccess as e:  # layer 2: kubesupport's own namespace or objects
+        except boundaries.RestrictedAccess as e:  # tried to read our own namespace or objects
             return _refuse(sender, text, str(e), e.stopped_by)
-        except ValueError as e:  # bad arguments or a namespace outside the allowlist
+        except ValueError as e:  # bad arguments, or a namespace outside the allowlist
             return _reply(str(e))
         except Exception as e:
             logger.exception("Teams quick command failed")
             return _reply(_failure(e))
 
-    # Slow work: AI questions and RCAs
+    # slow path: AI questions and RCAs
     if cmd == "ask" and not agent.llm:
         return _reply("No AI model is configured, so I can only run commands.\n\n" + HELP)
     if not REPLY_TARGET:

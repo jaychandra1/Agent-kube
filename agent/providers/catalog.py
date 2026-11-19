@@ -1,8 +1,8 @@
-"""Every AI provider kubesupport supports, and the code that picks one.
+"""The provider catalog, and the code that picks one.
 
-LLM_PROVIDER (ConfigMap) names the provider; only that one is used. The API key goes in the
-Secret as LLM_API_KEY, or under the provider's own variable name (e.g. GROQ_API_KEY).
-Every default below can be overridden in the ConfigMap:
+LLM_PROVIDER (ConfigMap) names the provider and only that one is used. The key goes into
+the Secret as LLM_API_KEY or under the provider's own name (GROQ_API_KEY etc).
+All defaults below can be overridden in the ConfigMap:
 
   LLM_MODEL                model name (Azure OpenAI: the deployment name)
   LLM_BASE_URL             API endpoint (required for azure-openai, ollama and custom)
@@ -14,7 +14,7 @@ Every default below can be overridden in the ConfigMap:
   LLM_TIMEOUT_SECONDS      one model call (Cursor: one whole run)
   LLM_FALLBACKS            Claude only: server-side refusal fallback ("default" or "off")
 
-To add a provider with an OpenAI-compatible API, add one Spec to CATALOG. Anything else
+A new provider with an OpenAI-compatible API is one more Spec in CATALOG. Anything else
 needs a class in this folder (see base.py) and a branch in _build().
 """
 import os
@@ -22,11 +22,11 @@ from dataclasses import dataclass, field
 
 from .base import Limits, Provider, ProviderError
 
-# Free plans allow only a few thousand tokens per minute: small requests, short tool output.
+# free plans only allow a few thousand tokens per minute, so small requests and short tool output
 FREE_TIER = Limits(steps=8, tool_chars=2500, request_chars=14000, output_tokens=2500, timeout=120)
 STANDARD = Limits(steps=12, tool_chars=8000, request_chars=60000, output_tokens=4000, timeout=120)
 LARGE = Limits(steps=14, tool_chars=15000, request_chars=200000, output_tokens=16000, timeout=300)
-# Cursor runs its own loop: steps = reminders to submit the RCA; timeout = one whole run.
+# Cursor runs its own loop: steps = submit_rca reminders, timeout = one whole run
 AGENT = Limits(steps=2, tool_chars=15000, request_chars=0, output_tokens=0, timeout=600)
 
 
@@ -35,7 +35,7 @@ class Spec:
     name: str                # value of LLM_PROVIDER
     kind: str                # "claude" | "openai" (OpenAI-compatible) | "cursor"
     title: str
-    key_env: str             # the provider's own key variable; LLM_API_KEY always works too
+    key_env: str             # the provider's own key variable (LLM_API_KEY always works too)
     base_url: str = ""       # "" = set LLM_BASE_URL
     model: str = ""          # "" = set LLM_MODEL
     effort: str = ""         # default LLM_EFFORT
@@ -79,8 +79,8 @@ def _number(env, name: str, cast):
 
 
 def resolve(env=None) -> dict:
-    """Read the LLM_* settings. Returns {"spec", "key", "model", "base_url", "effort", "limits",
-    "fallbacks"} or {"off": reason} / {"error": reason}."""
+    """Read the LLM_* settings into {"spec", "key", "model", "base_url", "effort", "limits",
+    "fallbacks"}. Returns {"off": reason} or {"error": reason} if there's nothing to load."""
     env = os.environ if env is None else env
     raw = _setting(env, "LLM_PROVIDER").lower()
     name = ALIASES.get(raw, raw)
@@ -128,7 +128,7 @@ def _build(cfg: dict) -> Provider:
 
 
 def load_provider(env=None) -> tuple[Provider | None, str]:
-    """(provider or None, one line for the log and /alerts/status)."""
+    """Returns (provider or None, a status line for the log and /alerts/status)."""
     try:
         cfg = resolve(env)
         if "spec" not in cfg:
@@ -136,6 +136,6 @@ def load_provider(env=None) -> tuple[Provider | None, str]:
         provider = _build(cfg)
     except ProviderError as e:
         return None, str(e)
-    except Exception as e:  # e.g. a bad key format rejected by an SDK at construction
+    except Exception as e:  # SDK constructors can throw, e.g. on a malformed key
         return None, f"{type(e).__name__}: {e}"
     return provider, f"{provider.title}, model {provider.model}"

@@ -1,8 +1,8 @@
-"""Adaptive Cards for Microsoft Teams.
+"""Adaptive Cards for Teams.
 
-Cards are posted to Teams Workflows webhooks ("Send webhook alerts to a chat / channel"),
-which expect a message with Adaptive Card attachments. Schema 1.2 keeps them compatible
-with every Teams client. Text is truncated so a card stays under Teams' ~28 KB limit.
+Posted to Workflows webhooks, which want a message with Adaptive Card attachments.
+Schema 1.2 works on every Teams client. Text gets truncated so a card stays under
+Teams' ~28 KB limit.
 """
 import json
 import os
@@ -51,11 +51,11 @@ def card(body: list) -> dict:
 
 
 def message(adaptive_card: dict) -> dict:
-    """Wrap a card in the message envelope Teams Workflows webhooks expect, shrinking it if needed."""
+    """Wrap a card in the envelope Workflows expects. Shrinks it if it's too big."""
     payload = {"type": "message", "attachments": [{
         "contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None, "content": adaptive_card}]}
     if len(json.dumps(payload)) > MAX_CARD_BYTES:
-        # Too big: drop blocks from the end until it fits, then say so.
+        # drop blocks from the end until it fits, and say so
         body = adaptive_card["body"]
         while len(body) > 1 and len(json.dumps(payload)) > MAX_CARD_BYTES - 200:
             body.pop()
@@ -72,14 +72,14 @@ def _header(title: str, severity: str | None, subtitle: str | None = None) -> di
 
 
 def _engine(rca: dict) -> str:
-    """Who wrote an RCA, without naming the AI provider or model: that is part of kubesupport's
-    setup (boundaries.py). The full value stays in the API response and the log."""
+    """Engine label for the cards. Doesn't name the provider or model on purpose (see
+    boundaries.py), the full value is still in the API response and the log."""
     by = str(rca.get("generated_by") or "?")
     return "AI model" if by.startswith("llm:") else "built-in rules" if by == "heuristic" else by
 
 
 def alert_card(incident: dict, rca: dict | None, reminder: bool = False) -> dict:
-    """New-incident (or reminder) alert, with the RCA summary when there is one."""
+    """Alert for a new incident, or a reminder. Carries the RCA summary if we have one."""
     sev = (rca or {}).get("severity", "SEV2")
     kind = "Still failing" if reminder else "New incident"
     title = (rca or {}).get("title") or f"{incident['reason']} in {incident['workload']}"
@@ -102,7 +102,7 @@ def alert_card(incident: dict, rca: dict | None, reminder: bool = False) -> dict
             _text(f"Confidence: {rca.get('confidence', '?')} - engine: {_engine(rca)}",
                   200, isSubtle=True, size="Small"),
         ]
-    if incident.get("pod") and not boundaries.is_protected(incident.get("namespace")):  # that one would be refused
+    if incident.get("pod") and not boundaries.is_protected(incident.get("namespace")):  # would be refused anyway
         body.append(_text(f"Ask in Teams: @kubesupport rca {incident['namespace']}/{incident['pod']}",
                           300, isSubtle=True, size="Small"))
     return card(body)
@@ -154,9 +154,9 @@ def rca_card(rca: dict, asked_by: str | None = None, question: str | None = None
 
 
 def restricted_card(event: dict) -> dict:
-    """For the administrators: who asked kubesupport about itself, what they asked, and why it
-    was refused (an event from boundaries.record)."""
-    question = (event.get("question") or "(empty)").replace("](", "] (")  # no hidden links in an admin channel
+    """Card for the admins: who asked about kubesupport itself, what, and why it was refused.
+    event comes from boundaries.record."""
+    question = (event.get("question") or "(empty)").replace("](", "] (")  # break markdown links
     body = [
         _header("Restricted question refused", "SEV2",
                 "Someone asked kubesupport about itself and was told they are not authorised"),
@@ -181,11 +181,9 @@ _OFFER = re.compile(r"^(if you(?:'d| would)? (?:want|like|need)|let me know|woul
 
 
 def tidy_answer(text: str) -> str:
-    """Make an AI answer easy to scan in a Teams card:
-    - Markdown headings become bold lines (Teams draws "# ..." as a huge title);
-    - a closing offer ("If you want ...", "Let me know ...") is dropped;
-    - runs of blank lines are collapsed.
-    Tables and code blocks are left exactly as they are."""
+    """Clean up an AI answer for the card: headings become bold lines (Teams draws "# x" as a
+    huge title), a trailing "If you want ..." offer is dropped and blank lines are collapsed.
+    Tables and code blocks are left alone."""
     lines, in_code = [], False
     for line in (text or "").strip().splitlines():
         if line.strip().startswith("```"):
@@ -193,7 +191,7 @@ def tidy_answer(text: str) -> str:
         heading = None if in_code else _HEADING.match(line)
         if heading:
             line = f"**{heading.group(1).strip().strip('*').strip()}**"
-        if line.strip() or (lines and lines[-1].strip()):  # at most one blank line in a row
+        if line.strip() or (lines and lines[-1].strip()):  # max one blank line in a row
             lines.append(line.rstrip())
     paragraphs = "\n".join(lines).strip().split("\n\n")
     last = paragraphs[-1].strip()
@@ -211,7 +209,7 @@ def answer_card(question: str, asked_by: str | None, answer: str) -> dict:
 
 
 def activity_card(groups: list, total: int, more: int, highlight: bool, window_seconds: int = 60) -> dict:
-    """Cluster activity: groups is [(title, [line, ...]), ...] in display order."""
+    """groups is [(title, [line, ...]), ...] in display order."""
     when = "in the last minute" if window_seconds == 60 else f"in the last {window_seconds} s"
     body = [_header(f"Cluster activity: {total} event(s)", "SEV2" if highlight else "SEV3",
                     f"{when} - who did what (read-only notice; nothing was blocked)")]

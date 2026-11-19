@@ -1,14 +1,14 @@
-"""kubesupport entrypoint.
+"""Entrypoint. Starts up to three servers:
 
-* Port 8000 (HTTP, internal only): the API and health checks (app.app).
-* Port 8080 (HTTP): only POST /teams/webhook (app.teams_app). This is the one port the
-  Cloudflare Tunnel forwards to; the NetworkPolicy lets only the tunnel pods reach it.
-* Port 8443 (HTTPS): the activity webhook the Kubernetes API server calls (activity.py).
-  It starts only when the certificate from deploy/webhook-cert.sh is mounted and
-  ACTIVITY_ENABLED is true.
-The extra servers run in background threads, so the main server keeps handling shutdown
-signals. If one of them stops, that is recorded: a dead Teams server fails /healthz (the pod
-is restarted); a dead activity webhook shows in /activity/status.
+  8000  internal API and health checks (app.app)
+  8080  POST /teams/webhook only (app.teams_app). The Cloudflare tunnel forwards here and
+        the NetworkPolicy only lets the tunnel pods in.
+  8443  activity webhook, HTTPS (activity.py). Only when the cert from
+        deploy/webhook-cert.sh is mounted and ACTIVITY_ENABLED is true.
+
+8080 and 8443 run in background threads so the main server keeps handling signals. If the
+Teams one dies /healthz fails and the pod is restarted, a dead activity webhook shows up
+in /activity/status.
 """
 import logging
 import os
@@ -16,8 +16,8 @@ import threading
 
 
 def setup_logging():
-    """Logging comes first, so messages written while the modules load aren't lost.
-    LOG_LEVEL: DEBUG, INFO (default), WARNING, ERROR. Health-check requests aren't logged."""
+    """Has to run before the other imports, they log while loading.
+    LOG_LEVEL is DEBUG / INFO / WARNING / ERROR. Probe requests are kept out of the access log."""
     level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").strip().upper(), logging.INFO)
     logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", force=True)
 
@@ -41,7 +41,7 @@ API_PORT, TEAMS_PORT, WEBHOOK_PORT = 8000, 8080, 8443
 
 
 def build_configs():
-    """(API config, Teams webhook config, activity webhook config or None)."""
+    """uvicorn configs for the api, teams and activity servers. The last one can be None."""
     api = uvicorn.Config(app, host="0.0.0.0", port=API_PORT, log_config=None)
     public = uvicorn.Config(teams_app, host="0.0.0.0", port=TEAMS_PORT, log_config=None, access_log=False)
     tls = activity.tls_files() if activity.ENABLED else None
@@ -56,12 +56,12 @@ def build_configs():
 
 
 def supervised(name: str, config, on_failure):
-    """Run a server in this thread; record it when it stops (bad certificate, port in use, crash)."""
+    """Thread that runs one server and reports when it stops (bad cert, port in use, crash)."""
     def run():
         try:
             uvicorn.Server(config).run()
             on_failure(name, "stopped")
-        except BaseException as e:  # SystemExit from a failed port bind included
+        except BaseException as e:  # uvicorn exits with SystemExit when the bind fails
             logger.error("The %s server stopped: %s: %s", name, type(e).__name__, e)
             on_failure(name, f"{type(e).__name__}: {e}")
     return threading.Thread(target=run, name=f"{name}-server", daemon=True)
