@@ -283,6 +283,7 @@ flowchart LR
 ```
 
 - [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs flake8 and pytest on every pull request and push. On `main` it builds and pushes the image.
+- The image build applies the base image's pending OS security updates, removes pip after installing, and replaces a vulnerable package bundled in the Cursor SDK, so that image scans stay clean ([SECURITY.md, section 2](SECURITY.md#2-the-image)).
 - The image ([`agent/Dockerfile`](../agent/Dockerfile)) contains every AI provider. `--build-arg WITH_CURSOR=false` leaves out the Cursor SDK, which has a proprietary licence.
 - Deploys are manual and explicit: `kubectl apply` of the files in `deploy/`. There is no Helm chart and no Terraform, on purpose.
 

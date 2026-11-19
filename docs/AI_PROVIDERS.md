@@ -131,7 +131,8 @@ kubesupport supports two provider shapes ([`providers/base.py`](../agent/provide
 - The SDK starts a helper process (its "bridge") on first use. `HOME` is `/tmp` in the image, the only writable place in the pod.
 - If the agent answers with `kubectl` instructions without using a tool, it is told once to look the answer up; an RCA submitted without any tool call is rejected and the rules write it instead.
 - One Cursor run at a time; `LLM_TIMEOUT_SECONDS` (default 600) cancels a run that takes too long. If the agent doesn't call `submit_rca`, it is reminded `LLM_MAX_STEPS` times (default 2), then the rules take over.
-- Not verified on a live cluster yet: whether the bridge needs more writable space than `/tmp` under the read-only root filesystem. If Cursor fails at startup, the agent log says why (see Troubleshooting below).
+- The helper works under the pod's restrictions: started in the built image as the non-root user, with a read-only filesystem and all capabilities dropped, it comes up in about a second and keeps its state under `/tmp/.cursor`. What tests can't cover is a full run against Cursor's service, which needs a real key.
+- The SDK's helper bundles its own Node.js packages. One of them, `undici`, is an unmaintained version with known vulnerabilities, so the image build replaces it with a fixed, checksum-verified release and checks that the helper still loads ([SECURITY.md, section 2](SECURITY.md#2-the-image)).
 - Building the image without Cursor: `docker build --build-arg WITH_CURSOR=false agent` (the SDK has a proprietary licence; check Cursor's terms before publishing an image that includes it).
 
 ---
@@ -183,6 +184,6 @@ On a **paid Groq plan**, raise `LLM_MAX_REQUEST_CHARS` and `LLM_TOOL_OUTPUT_CHAR
 | Cursor: `ConfigurationError` / `AuthenticationError` in the log | Wrong or missing `CURSOR_API_KEY` / `LLM_API_KEY`; a repository-scoped Cursor key (use a user or service-account key); or the model name isn't available on your plan (try another `LLM_MODEL`). |
 | Cursor: `Cursor run took longer than …` | Raise `LLM_TIMEOUT_SECONDS`. |
 | Cursor answers with `kubectl` commands or says it "could not run any cluster tools" | The pod runs an older image in which the agent's tools were switched off (`tools=[]`). Deploy the current image. The log line `still used no cluster tool` means the agent still isn't reaching the tools. |
-| Cursor fails right after start with a file-system error | The SDK's helper wants to write outside `/tmp`. Report it, and meanwhile use another provider. |
+| Cursor fails right after start with a file-system error | The helper writes only under `/tmp` (`HOME=/tmp`). Check the pod still mounts the `tmp` volume and that it isn't full (`sizeLimit` in `deployment.yaml`). |
 | Azure OpenAI: HTTP 404 | `LLM_MODEL` must be the **deployment name**, and `LLM_BASE_URL` must end in `/openai/v1`. |
 | Outbound traffic is restricted | Allow HTTPS to the provider's host: `api.groq.com`, `api.anthropic.com`, `generativelanguage.googleapis.com`, `api.openai.com`, `<resource>.openai.azure.com`, `openrouter.ai`, `api.mistral.ai`. For Cursor, allow the hosts in Cursor's network documentation. |

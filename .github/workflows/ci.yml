@@ -3,6 +3,8 @@ name: CI
 # Lint + tests (including checks of deploy/*.yaml) on every PR and push.
 # On push to main: build the agent image for amd64 + arm64 and push it to Docker Hub as
 #   docker.io/<DOCKERHUB_USERNAME>/kubesupport:sha-<7 chars>  and  :latest
+# "Run workflow" on main (Actions tab) rebuilds and pushes the image without a code change:
+# use it to pick up operating-system security updates.
 # Needs (GitHub → Settings → Secrets and variables → Actions):
 #   variable DOCKERHUB_USERNAME  - your Docker Hub user or organization
 #   secret   DOCKERHUB_TOKEN     - a Docker Hub access token with Read & Write
@@ -44,7 +46,7 @@ jobs:
 
   build-and-push:
     name: Build & push image to Docker Hub
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: [test]
     runs-on: ubuntu-latest
     steps:

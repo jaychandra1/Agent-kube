@@ -94,5 +94,6 @@ Provider defaults are in the table in [AI_PROVIDERS.md, section 5](AI_PROVIDERS.
 | `RUNBOOK_DIR` | code default `agent/runbooks` | Notes searched by the `search_runbooks` tool |
 | `HOME` | `/tmp` (Dockerfile) | The only writable place in the pod; the Cursor SDK keeps its state there |
 | `WITH_CURSOR` | build argument, `true` | `false` builds the image without the Cursor SDK |
+| `UNDICI_VERSION`, `UNDICI_INTEGRITY` | constants in `agent/docker/patch_cursor_bridge.py` | The fixed `undici` release the image build puts into the Cursor SDK, and its SHA-512 |
 | Image, replicas, resources, probes | `deploy/deployment.yaml` | Edited directly in the Deployment |
 | Cloudflare route and firewall rules | Cloudflare dashboard | INSTALLATION.md, Step 8 |

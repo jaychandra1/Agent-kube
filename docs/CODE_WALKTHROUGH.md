@@ -30,6 +30,7 @@ Agent-kube/
 │   ├── runbooks/                   Short notes the AI model can search (search_runbooks)
 │   ├── tests/                      pytest suite: no cluster, AI provider or Teams needed
 │   ├── Dockerfile, .dockerignore
+│   ├── docker/patch_cursor_bridge.py   Image build step: replaces the Cursor SDK's vulnerable undici
 │   └── requirements.txt, requirements-cursor.txt, requirements-dev.txt
 ├── deploy/
 │   ├── deployment.yaml             Namespace, RBAC, ConfigMap, Deployment, Services, NetworkPolicy
@@ -153,6 +154,7 @@ Liveness: `Watcher.healthy()` is false when no scan finished for 5 intervals (at
 | `test_provider_openai_compat.py` | History conversion, request budget, retries, rate limits, Azure header, a full Groq investigation |
 | `test_provider_claude.py` | The request sent to the Anthropic API |
 | `test_provider_cursor.py` | Cursor with a fake SDK: only the `mcp` tool group, tool callbacks, RCA, reminders, RCAs without evidence rejected, the push to use tools, chat, timeouts |
+| `test_image_build.py` | The undici patch (replacement, checksum, refusal on unknown importers, safe unpacking) and what the Dockerfile must keep doing (OS updates, no pip, no build helpers) |
 | `test_manifests.py` | `deploy/*.yaml`: names, read-only RBAC without Secrets, settings that exist in code, no keys in the ConfigMap, network policies, tunnel hardening |
 | `test_rules.py` | Every built-in diagnosis rule: trigger, conclusion, confidence, severity, timeline; every RCA complete |
 | `test_production.py` | New incident types, partial API failures, card retries, liveness, AI backlog, bounded sessions, busy replies, hidden env values, name validation, redaction, the deadline, the closed internal API, supervised servers |

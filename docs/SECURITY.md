@@ -38,7 +38,26 @@ flowchart LR
 
 ---
 
-## 2. What leaves the cluster
+## 2. The image
+
+What [`agent/Dockerfile`](../agent/Dockerfile) does so that an image scan (Trivy, for example) stays clean:
+
+| Step | Why |
+|---|---|
+| `apt-get upgrade` at build time | Installs the security fixes Debian published after the Python base image was built (for example `zlib1g`). |
+| pip is upgraded for the build, then **removed** | Nothing needs pip at runtime, and its CVEs would otherwise appear in every scan. The copy Python keeps for re-installing pip is removed too. |
+| The Cursor SDK's bundled `undici` is replaced | The SDK's helper program ships `undici` 5.29.0 (with `@fastify/busboy` 2.1.1), a release line that gets no more security fixes. [`docker/patch_cursor_bridge.py`](../agent/docker/patch_cursor_bridge.py) swaps in a pinned, checksum-verified `undici` 6.x, removes `@fastify/busboy`, and then loads the helper's modules to prove they still work. If any check fails, the image build fails. |
+| Build helpers and tests are left out | `docker/` and `tests/` are not in the final image. |
+
+About the `undici` findings: in the SDK, `undici` is only imported as a fallback for Node.js older than 18, and the SDK runs on its own bundled Node.js 22+. So that code was loaded but never used, and the practical risk was low. Replacing it is still right: scanners report by version, and unused vulnerable code shouldn't ship.
+
+**Fixable and unfixed findings.** With these steps a Trivy scan of the image reports no finding that has a fix (checked with Trivy 0.76.1 on 2026-11-19). A scan that also lists advisories *without* a fix shows many entries for Debian base packages (glibc, util-linux, OpenSSL, …): Debian hasn't released fixes for those, they are in every Debian-based image, and they go away by rebuilding once Debian publishes the fix.
+
+A scan is a snapshot: new advisories appear all the time. Rebuild the image regularly (re-run CI) so the OS updates are picked up, and rescan after every rebuild. What to do with a new finding is in [OPERATIONS.md](OPERATIONS.md#when-a-vulnerability-scan-reports-something).
+
+---
+
+## 3. What leaves the cluster
 
 | To | What | When |
 |---|---|---|
@@ -51,7 +70,7 @@ With `LLM_PROVIDER: "none"` (or a self-hosted model through `ollama` / `custom`)
 
 ---
 
-## 3. Things to know
+## 4. Things to know
 
 - **Activity webhook and Secrets.** The API server sends the whole object to an admission webhook, Secrets included; kubesupport keeps only the name. To keep Secret objects away entirely, remove `secrets` from the rules in `deploy/activity-webhook.yaml` and re-run `webhook-cert.sh`.
 - **Exec content.** Only the starting command of `kubectl exec` is visible (e.g. `sh`), not what is typed inside the shell.

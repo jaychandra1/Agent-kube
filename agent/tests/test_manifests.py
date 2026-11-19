@@ -78,7 +78,14 @@ def test_secret_keys_are_real_settings():
 def test_deployment():
     (dep,) = by_kind(DOCS, "Deployment")
     spec = dep["spec"]
-    assert spec["replicas"] == 1 and spec["strategy"]["type"] == "Recreate"
+    assert spec["replicas"] == 1  # the watcher and the activity feed run inside the pod: one copy
+    # Either rollout style is fine with one replica. Recreate never runs two pods. RollingUpdate
+    # must start the new pod before stopping the old one (no gap in alerting, and a broken image
+    # never takes the running pod down); two pods then overlap for a moment during a rollout.
+    strategy = spec["strategy"]
+    assert strategy["type"] in ("Recreate", "RollingUpdate")
+    if strategy["type"] == "RollingUpdate":
+        assert strategy["rollingUpdate"] == {"maxSurge": 1, "maxUnavailable": 0}
     pod = spec["template"]["spec"]
     assert pod["serviceAccountName"] == "kubesupport"
     assert spec["selector"]["matchLabels"].items() <= spec["template"]["metadata"]["labels"].items()

@@ -10,6 +10,7 @@ In the commands below, `<you>` is your Docker Hub user, and `$KEY` / the port-fo
 
 | Task | How |
 |---|---|
+| **Pick up security updates** | Rebuild the image even without code changes (GitHub: **Actions → CI → Run workflow**), then `kubectl -n kubesupport rollout restart deploy/kubesupport`. Do this regularly, e.g. monthly, and after any scan finding. |
 | **Roll out a new image** (after CI pushed a new `latest`) | `kubectl -n kubesupport rollout restart deploy/kubesupport` |
 | **Pin or roll back a version** (recommended in production) | `kubectl -n kubesupport set image deployment/kubesupport agent=docker.io/<you>/kubesupport:sha-xxxxxxx`, and put the same tag in `deployment.yaml` so the next `apply` doesn't undo it. With `:latest`, any restart runs whatever was last pushed. |
 | **Change a setting** | Edit the ConfigMap in `deploy/deployment.yaml`, then `kubectl apply -f deploy/deployment.yaml && kubectl -n kubesupport rollout restart deploy/kubesupport` |
@@ -25,6 +26,24 @@ In the commands below, `<you>` is your Docker Hub user, and `$KEY` / the port-fo
 | **Rotate the Teams outgoing-webhook token** | Delete and recreate the outgoing webhook in Teams (INSTALLATION.md, Step 4.3), then update `TEAMS_OUTGOING_WEBHOOK_SECRET` and restart |
 | **See what it sees** | `/alerts/status`, `/activity/status`, `/activity` (port-forward), `@kubesupport status` / `activity` in Teams, or `kubectl -n kubesupport logs deploy/kubesupport -f` |
 | **Uninstall** | `kubectl delete validatingwebhookconfiguration kubesupport-activity` **first** (it's cluster-wide), then `kubectl delete -f deploy/cloudflare-tunnel.yaml -f deploy/deployment.yaml` (also deletes the namespace and Secrets). Finally delete the tunnel in Cloudflare (its DNS record goes with it), and the outgoing webhook and workflows in Teams. |
+
+---
+
+## When a vulnerability scan reports something
+
+The image is built to scan clean ([SECURITY.md, section 2](SECURITY.md#2-the-image)). When a scanner such as Trivy reports a new finding, look at the **package** column:
+
+| Package in the report | Where it comes from | Fix |
+|---|---|---|
+| A Debian package with **no fixed version** listed | The Python base image | Nothing to do yet: Debian hasn't released a fix. It disappears with a rebuild once it has. |
+| A Debian package (`zlib1g`, `libssl3`, `libc6`, …) with a fixed version | The Python base image | Rebuild the image: the build runs `apt-get upgrade`. In GitHub: **Actions → CI → Run workflow**. Then restart kubesupport. |
+| A Python package (`fastapi`, `requests`, `kubernetes`, …) | [`agent/requirements.txt`](../agent/requirements.txt) | Rebuilding installs the newest version inside the allowed range. If the fix is outside the range, raise the upper bound, run the tests, rebuild. |
+| `pip` | Shouldn't appear: the image has no pip | Check the pod runs a current image. |
+| `undici` | The Cursor SDK's bundled helper | Set `UNDICI_VERSION` and `UNDICI_INTEGRITY` in [`agent/docker/patch_cursor_bridge.py`](../agent/docker/patch_cursor_bridge.py) to the fixed release (the integrity value is `dist.integrity` at `https://registry.npmjs.org/undici/<version>`), then rebuild. Stay on the 6.x line unless the fix exists only in a later one. |
+| Another Node package under `cursor_sdk/_vendor` | The Cursor SDK | Check for a newer `cursor-sdk` release ([`requirements-cursor.txt`](../agent/requirements-cursor.txt)). If you don't use Cursor, build without it: `--build-arg WITH_CURSOR=false`. |
+| `cloudflared` image findings | [`deploy/cloudflare-tunnel.yaml`](../deploy/cloudflare-tunnel.yaml) | Move the pinned tag to a newer release (see *Update cloudflared* above). |
+
+After a rebuild, restart the pod and let the scanner rescan; with the Trivy Operator the new report appears by itself a few minutes after the new pod starts.
 
 ---
 
@@ -107,7 +126,7 @@ Logs worth knowing:
 | 11 | **Free AI plans** | Per-minute and per-day token limits make AI answers slow (minutes) and stop them for the day once used up; alerts then carry rule-based RCAs. |
 | 12 | **Open models are less predictable** | They sometimes skip a tool or return an incomplete RCA. kubesupport reminds the model, checks the result, and falls back to the rules if it is still unusable. |
 | 13 | **Cloudflare is in the path of questions** | Questions depend on Cloudflare and the tunnel pods; alerts and activity don't. |
-| 14 | **Cursor provider not yet verified in a live cluster** | Covered by tests with a fake SDK. Its helper process may need more writable space than `/tmp` under the read-only filesystem; see [AI_PROVIDERS.md](AI_PROVIDERS.md#troubleshooting). |
+| 14 | **Cursor depends on a bundled helper program** | The Cursor SDK runs its own Node.js helper inside the pod (about 175 MB of the image). It starts fine under the pod's restrictions (read-only filesystem, non-root), but its packages are Cursor's to update; the image build patches the one with known vulnerabilities ([SECURITY.md](SECURITY.md#2-the-image)). |
 | 15 | **Activity events can be faked from inside the cluster** | Port 8443 can't be limited to the API server's (changing) addresses, so a pod could post a made-up event. Confirm important ones in the EKS audit logs. |
 
 ---
