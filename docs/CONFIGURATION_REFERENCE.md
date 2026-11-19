@@ -22,6 +22,7 @@ For a Secret value, see *Change a secret* in [OPERATIONS.md](OPERATIONS.md#day-t
 | `TEAMS_REPLY_WEBHOOK_URL` | first alert URL | Workflows webhook of the questions channel, for answers that take longer than 5 s. Each answer carries `threadMessageId` and `channelId`, so the workflow can reply in the question's thread. |
 | `TEAMS_OUTGOING_WEBHOOK_SECRET` | – | The outgoing webhook's security token. Without it `/teams/webhook` is off (404). |
 | `TEAMS_ACTIVITY_WEBHOOK_URLS` | the alert targets | Send activity cards somewhere other than the alerts (same format as the alert URLs) |
+| `TEAMS_SECURITY_WEBHOOK_URLS` | the alert targets | Where the "someone asked about kubesupport itself" notices go (same format as the alert URLs). Use the Workflows webhook of a private channel that only administrators can read. |
 
 The Secret `kubesupport-tunnel` holds `TUNNEL_TOKEN` for the Cloudflare Tunnel pods (INSTALLATION.md, Step 8).
 
@@ -59,6 +60,7 @@ The Secret `kubesupport-tunnel` holds `TUNNEL_TOKEN` for the Cloudflare Tunnel p
 | `LLM_TIMEOUT_SECONDS` | provider default | One model call (Cursor: one whole run) |
 | `LLM_FALLBACKS` | `default` | Claude only: server-side refusal fallback; `off` to disable |
 | `LLM_DEADLINE_SECONDS` | `300` | Longest an AI answer or RCA may take; after that the built-in rules answer |
+| `ANSWER_MAX_WORDS` | `80` | How many words an answer to a question may have outside its table. The model is told this limit; an answer more than one and a half times over it is sent back once to be shortened. `0` = no limit and no rewrite. Raise it for more detailed answers. |
 
 Provider defaults are in the table in [AI_PROVIDERS.md, section 5](AI_PROVIDERS.md#5-limits-per-provider).
 
@@ -77,6 +79,15 @@ Provider defaults are in the table in [AI_PROVIDERS.md, section 5](AI_PROVIDERS.
 |---|---|---|
 | `TEAMS_TENANT_ID` | `""` | Only answer messages from this Microsoft 365 tenant (recommended) |
 | `TEAMS_ALLOWED_USER_IDS` | `""` | Only answer these people: comma-separated Entra object IDs (recommended) |
+
+### Boundaries
+
+What people in Teams may not ask ([RULES.md, section 6](RULES.md#6-boundaries-what-may-not-be-asked)).
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `BOUNDARIES_ENABLED` | `true` | Refuse and report questions about kubesupport itself: its setup, AI model, rules, prompt and namespace. `false` switches all three layers off (not recommended). |
+| `PROTECTED_NAMESPACES` | `kubesupport` | Comma-separated namespaces that can't be read through Teams, by command or by the AI. Cluster-wide objects whose name is one of these or starts with it (`kubesupport-cluster-read`) are covered too. Set it to the namespace kubesupport is installed in; add others you want to keep out of Teams. `none` protects no namespace: questions are still filtered. |
 
 ### Other
 

@@ -24,6 +24,9 @@ In the commands below, `<you>` is your Docker Hub user, and `$KEY` / the port-fo
 | **Update cloudflared** | Change the image tag in `deploy/cloudflare-tunnel.yaml` to a newer release (Docker Hub `cloudflare/cloudflared` tags), then `kubectl apply -f deploy/cloudflare-tunnel.yaml`. The two pods are replaced one at a time, so questions keep working. |
 | **Rotate the tunnel token** (e.g. it leaked) | Delete the tunnel in Cloudflare and redo INSTALLATION.md Steps 8.1, 8.2 and 8.4 with a new one; recreate Secret `kubesupport-tunnel` and `kubectl -n kubesupport rollout restart deploy/kubesupport-tunnel` |
 | **Rotate the Teams outgoing-webhook token** | Delete and recreate the outgoing webhook in Teams (INSTALLATION.md, Step 4.3), then update `TEAMS_OUTGOING_WEBHOOK_SECRET` and restart |
+| **See who asked about kubesupport itself** | The card in Teams, `curl -s localhost:8080/security/restricted -H "x-api-key: $KEY"` (since the pod started), or `kubectl -n kubesupport logs deploy/kubesupport \| grep "Refused a restricted"` |
+| **Send those notices to a private channel** | Create a Workflows webhook in a private channel for administrators (as in INSTALLATION.md, Step 4.4), then `kubectl -n kubesupport patch secret kubesupport-secrets --type merge -p '{"stringData":{"TEAMS_SECURITY_WEBHOOK_URLS":"security=<URL>"}}'` and restart |
+| **Keep another namespace out of Teams** | `PROTECTED_NAMESPACES: "kubesupport,<namespace>"`, apply, restart |
 | **See what it sees** | `/alerts/status`, `/activity/status`, `/activity` (port-forward), `@kubesupport status` / `activity` in Teams, or `kubectl -n kubesupport logs deploy/kubesupport -f` |
 | **Uninstall** | `kubectl delete validatingwebhookconfiguration kubesupport-activity` **first** (it's cluster-wide), then `kubectl delete -f deploy/cloudflare-tunnel.yaml -f deploy/deployment.yaml` (also deletes the namespace and Secrets). Finally delete the tunnel in Cloudflare (its DNS record goes with it), and the outgoing webhook and workflows in Teams. |
 
@@ -63,6 +66,7 @@ curl -s localhost:8080/alerts/status -H "x-api-key: $KEY"
 | `watcher.open_incidents` | What you'd expect from the cluster |
 | `teams.alert_targets` | Lists your target names |
 | `teams.outgoing_webhook` | `true` if questions are set up |
+| `teams.security_targets` | Where notices about refused questions go: your security target, or the alert targets |
 | `llm.configured` | `true` with the provider and model you chose; otherwise `llm.status` says why |
 | `watcher.unchecked` | Empty. Otherwise it lists what the last scan couldn't read (`pods:<ns>`, `nodes`, `events`, `jobs`); incidents there are kept open. |
 | `watcher.ai_backlog` / `cards_waiting_for_retry` | Usually 0. A growing retry count means Teams refuses the cards (`/alerts/test`). |
@@ -82,10 +86,14 @@ curl -s localhost:8080/alerts/status -H "x-api-key: $KEY"
 | Teams says "Sorry, there was a problem…" after `@kubesupport` | Wrong security token (agent log: `Rejected /teams/webhook call…`), Cloudflare blocked the call (**Security → Events** in Cloudflare), or the tunnel is down. `curl -i -X POST https://<host>/teams/webhook` should give **401**. |
 | "Looking into it…" but no answer card | `TEAMS_REPLY_WEBHOOK_URL` is wrong or that workflow is off (agent log: `Teams target … returned …`), or the AI provider failed (agent log). |
 | Answers arrive as a new post, not in the question's thread | The answers workflow still uses "Post card in a chat or channel". Change it to "Reply with an adaptive card in a channel" with Message ID `triggerBody()?['threadMessageId']` ([INSTALLATION.md, Step 4.2](INSTALLATION.md#42-answers-in-the-questions-channel--t2)). |
+| Answers are too long, or too terse | The format is rule 11 of the AI's rules ([RULES.md](RULES.md#3-the-ais-rules)). Change `ANSWER_MAX_WORDS` in the ConfigMap (default 80; `0` = no limit), apply, restart. |
 | The AI answers with `kubectl` commands instead of data | An older image (Cursor's agent had no tools), or a weak model. Deploy the current image; see [AI_PROVIDERS.md](AI_PROVIDERS.md#troubleshooting). `@kubesupport get ingresses` and the other quick commands always return real data. |
 | "No AI model is configured" | `/alerts/status` → `llm.status` names the missing setting. See [AI_PROVIDERS.md](AI_PROVIDERS.md#troubleshooting). |
 | RCAs are rule-based although a provider is set | `llm_error` in a `/rca` response, or the agent log (`LLM investigation failed`): wrong key, model not available, the provider's rate or daily limit, or `MAX_LLM_RCA_PER_HOUR` reached. |
 | AI answers take minutes | Normal on free plans: kubesupport waits out the per-minute token limit (log: `Model API returned 429; retrying in …`). |
+| Someone gets "You are not authorised to ask this question" for an ordinary question | The question filter read it as a question about kubesupport itself ("you", "this bot" or "kubesupport" next to words such as "deployed" or "configured"), or the AI used its rule. The card and the log line say which layer and why. Ask again and name the workload or namespace. Examples of what is refused and what passes: [RULES.md, section 6](RULES.md#6-boundaries-what-may-not-be-asked). |
+| `pods kubesupport` and other reads of kubesupport's namespace are refused in Teams | By design: the namespace is in `PROTECTED_NAMESPACES`. Use `kubectl`. Incidents there are still alerted. |
+| No card when a restricted question is asked | `/alerts/status` → `teams.security_targets` is empty (no security or alert webhook), or more than 20 refusals came within an hour (then they are only logged). `/security/restricted` lists them all. |
 | "namespace … not allowed" | Add it to `ALLOWED_NAMESPACES`, or set `"*"`. |
 | Too many incident alerts | Narrow `ALLOWED_NAMESPACES`, or raise `ALERT_COOLDOWN_MINUTES`. |
 | Pod never created; events say `violates PodSecurity "restricted"` for `opentelemetry-auto-instrumentation-…` | The CloudWatch Observability add-on is injecting OpenTelemetry containers. The manifests opt out with `instrumentation.opentelemetry.io/inject-*: "false"`; details in [INSTALLATION.md](INSTALLATION.md#troubleshooting). |
@@ -106,6 +114,9 @@ Logs worth knowing:
 | `Model API returned 429; retrying in Ns` | Waiting for a rate limit |
 | `Rejected /teams/webhook call with a missing or wrong HMAC signature` | A call that wasn't from your Teams webhook |
 | `Activity webhook off: …` | No certificate mounted, or `ACTIVITY_ENABLED` is false |
+| `Boundaries on: … reported to …; protected namespaces: …` | At startup: where notices about refused questions go and which namespaces are protected |
+| `Refused a restricted request from <name> (<user id>), stopped by the <layer>: <why> \| <question>` | Someone asked about kubesupport itself and was refused |
+| `Blocked tool call <tool>: …` | The AI model tried to read a protected namespace during a Teams question; it got no data |
 
 ---
 
@@ -128,6 +139,7 @@ Logs worth knowing:
 | 13 | **Cloudflare is in the path of questions** | Questions depend on Cloudflare and the tunnel pods; alerts and activity don't. |
 | 14 | **Cursor depends on a bundled helper program** | The Cursor SDK runs its own Node.js helper inside the pod (about 175 MB of the image). It starts fine under the pod's restrictions (read-only filesystem, non-root), but its packages are Cursor's to update; the image build patches the one with known vulnerabilities ([SECURITY.md](SECURITY.md#2-the-image)). |
 | 15 | **Activity events can be faked from inside the cluster** | Port 8443 can't be limited to the API server's (changing) addresses, so a pod could post a made-up event. Confirm important ones in the EKS audit logs. |
+| 16 | **Boundaries recognise wording** | The question filter knows English phrasing and can refuse an ordinary question by mistake or miss an unusual one; the AI's rule covers other wording and languages but is a model's judgement. What can't be worked around is the tool block: kubesupport's namespace and all Secrets are unreadable through Teams. Everyone is restricted, administrators included; refusals are kept in memory only (and in the pod's log). |
 
 ---
 

@@ -134,6 +134,7 @@ data:
   LLM_TIMEOUT_SECONDS: ""          # "" = provider default: one model call (Cursor: one whole run)
   LLM_FALLBACKS: "default"         # Claude only: server-side refusal fallback; "off" to disable
   LLM_DEADLINE_SECONDS: "300"      # longest an AI answer or RCA may take; then the built-in rules answer
+  ANSWER_MAX_WORDS: "80"           # words an answer may have outside its table; clearly longer ones are rewritten once ("0" = no limit)
   WATCH_ENABLED: "true"            # "false" = no incident alerts (questions still work)
   WATCH_INTERVAL_SECONDS: "60"     # how often the cluster is checked for failing pods
   ALERT_COOLDOWN_MINUTES: "60"     # reminder for a still-open incident at most this often
@@ -146,6 +147,8 @@ data:
   ACTIVITY_IGNORE_NAMESPACES: "kube-node-lease"  # namespaces whose activity is not reported
   TEAMS_TENANT_ID: "5a1f4efd-5119-4558-8d3a-fea50f623c20"              # recommended: only answer Teams messages from your Microsoft 365 tenant (Step 8.5)
   TEAMS_ALLOWED_USER_IDS: "38a349d8-18b4-430c-9a4f-f358a5307c5d"       # recommended: comma-separated Entra object IDs of the people allowed to ask (Step 8.5)
+  BOUNDARIES_ENABLED: "true"       # questions about kubesupport itself (setup, AI model, rules, its namespace) are refused and reported to the administrators (docs/RULES.md, section 6)
+  PROTECTED_NAMESPACES: "kubesupport"  # namespaces people in Teams can't read; change it if kubesupport runs in another namespace ("none" = protect no namespace)
   REPORT_DIR: "/tmp/reports"
 ---
 apiVersion: apps/v1

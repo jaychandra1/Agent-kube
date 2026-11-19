@@ -586,6 +586,27 @@ kubectl apply -f deploy/deployment.yaml && kubectl -n kubesupport rollout restar
 
 ✅ **Check:** someone not on the list who @mentions kubesupport gets *"you're not on this agent's allowed-users list"*, and nothing is run.
 
+### 8.6 Questions about kubesupport itself
+
+Nothing to switch on: `BOUNDARIES_ENABLED: "true"` and `PROTECTED_NAMESPACES: "kubesupport"` are already in the ConfigMap. Anyone who asks how kubesupport is set up, which AI model it uses, for its rules, or for anything in its own namespace is told *"You are not authorised to ask this question. It has been reported to the administrators."*, and a card with their name and question goes to the administrators ([RULES.md, section 6](RULES.md#6-boundaries-what-may-not-be-asked)).
+
+By default that card goes to the alert targets. To send it to a channel only administrators can read (recommended):
+
+1. Create a Workflows webhook in a private channel, as in Step 4.4.
+2. Add its URL to the Secret and restart:
+
+```bash
+kubectl -n kubesupport patch secret kubesupport-secrets --type merge -p '{"stringData":{"TEAMS_SECURITY_WEBHOOK_URLS":"security=<URL>"}}'
+```
+
+```bash
+kubectl -n kubesupport rollout restart deploy/kubesupport
+```
+
+If kubesupport runs in a namespace with another name, put that name in `PROTECTED_NAMESPACES`.
+
+✅ **Check:** `@kubesupport how are you set up?` is answered with the "not authorised" sentence, and the card "Restricted question refused" arrives with your name. `@kubesupport pods kubesupport` gives the same. `@kubesupport what can you do?` is answered normally.
+
 ---
 
 ## Step 9 — Test end to end
@@ -700,5 +721,5 @@ Everything after installation (new images, changing settings and secrets, switch
 - [ ] 6  `deployment.yaml` edited: image, CLUSTER_NAME (ALLOWED_NAMESPACES optional)
 - [ ] 7  Applied; pod Running; "kubesupport started" card; `kubectl auth can-i` checks as expected
 - [ ] 7b `bash deploy/webhook-cert.sh` run; `/activity/status` shows the certificate; test Service produced a "Cluster activity" card
-- [ ] 8  Tunnel created (C1); route W5 → `kubesupport-teams`; WAF and rate-limit rules; Secret `kubesupport-tunnel`; tunnel pods Ready; `curl` gives 401 and 403; private team; `TEAMS_TENANT_ID` and `TEAMS_ALLOWED_USER_IDS` set
+- [ ] 8  Tunnel created (C1); route W5 → `kubesupport-teams`; WAF and rate-limit rules; Secret `kubesupport-tunnel`; tunnel pods Ready; `curl` gives 401 and 403; private team; `TEAMS_TENANT_ID` and `TEAMS_ALLOWED_USER_IDS` set; "how are you set up?" is refused and reported (8.6)
 - [ ] 9  Test card received; `@kubesupport help` answered; crash test alerted and resolved

@@ -44,7 +44,8 @@ def test_alerts_status_and_api_key(client, monkeypatch):
     monkeypatch.setattr(app_module, "API_KEY", "k")
     assert client.get("/alerts/status").status_code == 401
     status = client.get("/alerts/status", headers={"x-api-key": "k"}).json()
-    assert status["teams"] == {"alert_targets": ["alert-1"], "reply_webhook": "reply-1", "outgoing_webhook": True}
+    assert status["teams"] == {"alert_targets": ["alert-1"], "security_targets": ["alert-1"], "reply_webhook": "reply-1",
+                               "outgoing_webhook": True}
     assert status["watcher"]["running"] is False  # WATCH_ENABLED=false in tests
 
 

@@ -1,7 +1,8 @@
 """kubesupport HTTP API.
 
 `app` (port 8000, internal only):  /healthz /ready /chat /rca /rca/latest /alerts/status /alerts/test
-                                   /activity /activity/status, and /teams/webhook for local testing
+                                   /activity /activity/status /security/restricted, and /teams/webhook
+                                   for local testing
 `teams_app` (port 8080, the only one the Cloudflare Tunnel reaches): POST /teams/webhook and
                                    nothing else, not even /docs, so a mistake in the Cloudflare
                                    settings can never expose the internal API
@@ -21,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 import activity
 import agent
+import boundaries
 import cards
 import report
 import teams
@@ -47,6 +49,12 @@ async def lifespan(_app: FastAPI):
         logger.info("TEAMS_OUTGOING_WEBHOOK_SECRET not set: /teams/webhook is disabled")
     if not API_KEY:
         logger.warning("AGENT_API_KEY is not set: the internal API (/rca, /chat, /alerts/*, /activity*) is off")
+    if boundaries.ENABLED:
+        logger.info("Boundaries on: questions about kubesupport itself are refused and reported to %s; protected "
+                    "namespaces: %s", ", ".join(name for name, _ in teams.SECURITY_TARGETS) or "the log only",
+                    ", ".join(sorted(boundaries.PROTECTED_NAMESPACES)) or "none")
+    else:
+        logger.warning("Boundaries are off (BOUNDARIES_ENABLED=false): people in Teams can ask about kubesupport itself")
     if activity.ENABLED:
         activity.FEED.start()
     yield
@@ -155,6 +163,7 @@ def alerts_status(x_api_key: str = Header(None)):
         "watcher": watcher.WATCHER.status(),
         "teams": {
             "alert_targets": [name for name, _ in teams.ALERT_TARGETS],
+            "security_targets": [name for name, _ in teams.SECURITY_TARGETS],
             "reply_webhook": teams.REPLY_TARGET[0] if teams.REPLY_TARGET else None,
             "outgoing_webhook": bool(teams.OUTGOING_SECRET),
         },
@@ -179,6 +188,15 @@ def activity_recent(limit: int = 50, x_api_key: str = Header(None)):
     auth(x_api_key)
     events = activity.FEED.latest(max(1, min(limit, 500)))
     return {"count": len(events), "events": [dict(e, text=activity.describe(e)) for e in events]}
+
+
+@app.get("/security/restricted")
+def security_restricted(limit: int = 50, x_api_key: str = Header(None)):
+    """Questions about kubesupport itself that were refused since this pod started: who, what, why."""
+    auth(x_api_key)
+    events = boundaries.recent(max(1, min(limit, boundaries.MAX_EVENTS)))
+    return {"enabled": boundaries.ENABLED, "protected_namespaces": sorted(boundaries.PROTECTED_NAMESPACES),
+            "count": len(events), "events": events}
 
 
 @app.get("/activity/status")

@@ -39,7 +39,7 @@ def main():
         print(json.dumps(issues, indent=2) if issues else "All pods in the watched namespaces look healthy.")
 
     elif args.command == "incidents":
-        found, _ = tools.detect_incidents({})
+        found, *_ = tools.detect_incidents({})
         print(json.dumps(list(found.values()), indent=2) if found else "No open incidents.")
 
     elif args.command == "rca":

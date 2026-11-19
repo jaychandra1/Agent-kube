@@ -196,11 +196,15 @@ sequenceDiagram
     participant TA as kubesupport :8080 (teams.py)
     participant A as agent.py + AI provider
     participant WH as Workflows webhook (questions channel)
+    participant AD as Workflows webhook (administrators)
     U->>MS: @kubesupport why is api restarting?
     MS->>CF: POST /teams/webhook, Authorization: HMAC ...
     CF->>TA: forwarded through the tunnel (only this path and method)
     TA->>TA: verify HMAC, tenant and allowed users
-    alt quick command (status, pods, events, logs, get, activity)
+    alt question about kubesupport itself (boundaries.py)
+        TA-->>MS: "You are not authorised to ask this question."
+        TA->>AD: card: who asked what, and why it was refused
+    else quick command (status, pods, events, logs, get, activity)
         TA-->>MS: answer within 5 seconds (same thread)
     else question or rca (slow)
         TA-->>MS: "Looking into it..." within 5 seconds
@@ -212,6 +216,8 @@ sequenceDiagram
 ```
 
 Teams waits at most **5 seconds** for an outgoing webhook's reply, so anything slower is answered through the channel's Workflows webhook. kubesupport sends the question's thread (`threadMessageId`) with the card; the workflow's **Reply with an adaptive card in a channel** action puts it under the question ([INSTALLATION.md, Step 4.2](INSTALLATION.md#42-answers-in-the-questions-channel--t2)). A workflow that still uses "Post card" starts a new post instead.
+
+**Boundaries.** A question about kubesupport itself (its setup, AI model, rules or namespace) is refused, and the administrators are told who asked. The first branch of the diagram is the question filter; the same refusal and notice follow when a command or the AI model reaches for kubesupport's own namespace, or when the AI model applies its own rule ([RULES.md, section 6](RULES.md#6-boundaries-what-may-not-be-asked)).
 
 ### 3.3 Cluster activity
 
@@ -305,6 +311,7 @@ flowchart LR
 | **Liveness reflects the watcher** | `/healthz` fails when scanning stops (e.g. a hung API call) or the Teams server dies, so Kubernetes restarts the pod instead of it silently not alerting. | A restart loses in-memory state. |
 | **Built-in rules quote their evidence** | A diagnosis without AI is still specific and honest about its confidence. | Rules only know common failure types. |
 | **Internal API closed without a key** | Nothing in the cluster can trigger RCAs or Teams posts unless it has `AGENT_API_KEY`. | One more secret to set. |
+| **Boundaries in three layers** (question filter, tool block, AI rule) | A filter alone can be reworded around and a model's rule alone can be talked around. The tool block makes kubesupport's namespace unreadable through Teams whatever is typed, and every refusal names the person to the administrators. | An ordinary question can be refused by mistake; administrators are restricted in Teams too and use `kubectl` for kubesupport's own namespace. |
 | **Manual `kubectl apply`, no Helm or Terraform** | Easy to read, review and change. | Values are edited in the YAML files. |
 
 Known limitations are listed in [OPERATIONS.md](OPERATIONS.md#limitations).

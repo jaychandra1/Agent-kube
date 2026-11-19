@@ -33,7 +33,8 @@ DOCS = load("deployment.yaml")
 WEBHOOK_DOCS = load("activity-webhook.yaml")
 TUNNEL_DOCS = load("cloudflare-tunnel.yaml")
 SECRET_KEYS = {"LLM_API_KEY", "GROQ_API_KEY", "CURSOR_API_KEY", "AGENT_API_KEY", "TEAMS_ALERT_WEBHOOK_URLS",
-               "TEAMS_REPLY_WEBHOOK_URL", "TEAMS_OUTGOING_WEBHOOK_SECRET"}
+               "TEAMS_REPLY_WEBHOOK_URL", "TEAMS_OUTGOING_WEBHOOK_SECRET", "TEAMS_SECURITY_WEBHOOK_URLS",
+               "TEAMS_ACTIVITY_WEBHOOK_URLS"}
 
 
 def test_all_objects_present_and_named_kubesupport():
@@ -69,6 +70,8 @@ def test_configmap_keys_are_real_settings():
     assert cm["data"]["ACTIVITY_IGNORE_USERS"] == activity.DEFAULT_IGNORE_USERS
     assert cm["data"]["LLM_PROVIDER"] in CATALOG  # one provider, named explicitly
     assert not any(k.endswith("_API_KEY") for k in cm["data"]), "keys belong in the Secret"
+    # shipped with the boundaries on, protecting the namespace everything here is installed in
+    assert cm["data"]["BOUNDARIES_ENABLED"] == "true" and cm["data"]["PROTECTED_NAMESPACES"] == "kubesupport"
 
 
 def test_secret_keys_are_real_settings():

@@ -8,6 +8,7 @@
 - **Alerts your Microsoft Teams chat and channels** (private channels included) with the root cause and fix steps, then a "Resolved" card when it's over.
 - **Reports cluster activity:** once a minute, *who* exec'd into a pod, created or deleted a service or app, changed permissions, or changed an image or replica count.
 - **Answers questions in a Teams channel:** `@kubesupport status`, `@kubesupport get services payments`, `@kubesupport activity`, or any question in plain words.
+- **Keeps itself private:** a question about kubesupport's own setup, AI model, rules or namespace gets "You are not authorised to ask this question", and the administrators get a card saying who asked what.
 
 Teams is wired up with configuration only (Workflows webhooks and an outgoing webhook): no Azure Bot Service, no Entra app registration, no Teams app package. Nothing in AWS is exposed to the internet: questions from Teams arrive through a Cloudflare Tunnel that the cluster opens outward.
 
@@ -40,7 +41,7 @@ All documentation is in [`docs/`](docs). This README is the only index.
 | # | Document | Read it to learn |
 |---|---|---|
 | 1 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | What kubesupport does and how it is built: components, the four flows (alerts, questions, activity, AI investigation) as diagrams, and the design decisions |
-| 2 | [RULES.md](docs/RULES.md) | Every rule it applies: what counts as an incident, when cards are sent, the AI's rules, the built-in diagnosis rules, activity filtering |
+| 2 | [RULES.md](docs/RULES.md) | Every rule it applies: what counts as an incident, when cards are sent, the AI's rules, the built-in diagnosis rules, activity filtering, and the boundaries (what may not be asked) |
 | 3 | [CODE_WALKTHROUGH.md](docs/CODE_WALKTHROUGH.md) | The code module by module, how a request moves through it, the tests, and how to extend it |
 | 4 | [AI_PROVIDERS.md](docs/AI_PROVIDERS.md) | Every supported AI provider and how to switch |
 | 5 | [INSTALLATION.md](docs/INSTALLATION.md) | Installing it in an EKS cluster and connecting Teams, step by step, with a check after each step |

@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import requests
 
 import agent
+import boundaries
 import cards
 import tools
 
@@ -54,6 +55,8 @@ def parse_targets(value: str, prefix: str) -> list[tuple[str, str]]:
 ALERT_TARGETS = parse_targets(os.getenv("TEAMS_ALERT_WEBHOOK_URLS", ""), "alert")
 _reply = parse_targets(os.getenv("TEAMS_REPLY_WEBHOOK_URL", ""), "reply")
 REPLY_TARGET = _reply[0] if _reply else (ALERT_TARGETS[0] if ALERT_TARGETS else None)
+# Where "someone asked about kubesupport itself" notices go: their own webhook(s), else the alert targets
+SECURITY_TARGETS = parse_targets(os.getenv("TEAMS_SECURITY_WEBHOOK_URLS", ""), "security") or ALERT_TARGETS
 OUTGOING_SECRET = os.getenv("TEAMS_OUTGOING_WEBHOOK_SECRET", "").strip()
 TENANT_ID = os.getenv("TEAMS_TENANT_ID", "").strip()
 ALLOWED_USER_IDS = {u.lower() for u in _split(os.getenv("TEAMS_ALLOWED_USER_IDS", ""))}
@@ -68,6 +71,7 @@ _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="teams-quick")
 _slow_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="teams-slow")
 MAX_SLOW_WAITING = 6             # questions/RCAs running or queued; more get a "busy" reply
 _slow_slots = threading.BoundedSemaphore(MAX_SLOW_WAITING)
+_notify_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="teams-notify")  # notices to administrators
 _seen_ids = deque(maxlen=500)    # Teams can resend the same message; answer once
 _seen_lock = threading.Lock()
 # AI chat history per channel thread (and per /chat session): bounded in number and age
@@ -218,8 +222,10 @@ def _status_text() -> str:
     incidents = watcher.WATCHER.current_incidents()
     source = "watcher"
     if incidents is None:  # watcher not running: detect once
-        found, _ = tools.detect_incidents({})
+        found, *_ = tools.detect_incidents({})
         incidents, source = list(found.values()), "live scan"
+    incidents = [i for i in incidents
+                 if not boundaries.blocks(i.get("namespace"), str(i.get("workload", "")).split("/")[-1])]
     if not incidents:
         return f"No open incidents ({source}). Watching: {tools.watched_namespaces_label()}."
     lines = [f"**{len(incidents)} open incident(s)** ({source}):"]
@@ -279,10 +285,10 @@ def _get_text(args: list[str]) -> str:
 
 def _activity_text() -> str:
     import activity  # local import: activity imports this module
-    events = activity.FEED.latest(20)
+    events = [e for e in activity.FEED.latest(60) if not boundaries.blocks(e.get("namespace"), e.get("name"))][-20:]
     if not events:
         status = activity.FEED.status()
-        hint = "" if status["webhook_certificate"] else " (the activity webhook isn't set up: run deploy/webhook-cert.sh)"
+        hint = "" if status["webhook_certificate"] else " (the activity feed is not set up; ask an administrator)"
         return f"No cluster activity recorded yet{hint}."
     return "**Latest cluster activity** (newest last):\n" + "\n".join(
         f"- {e['time'][11:19]} UTC - {activity.describe(e)}" for e in events)
@@ -337,16 +343,69 @@ def _reply(text: str) -> dict:
     return {"type": "message", "text": text}
 
 
-def _deliver_later(future, asked_by: str, question: str, is_rca: bool, thread: dict | None = None):
+# ─── Boundaries: questions about kubesupport itself (see boundaries.py) ──────
+
+def _as_teams_user(fn, *args):
+    """Run work for someone in Teams: the tools then refuse kubesupport's own namespace and objects."""
+    with boundaries.restricted_access():
+        return fn(*args)
+
+
+def report_restricted(sender: dict, question: str, reason: str, stopped_by: str) -> dict:
+    """Keep and log a refused request, and tell the administrators who asked what: a card to
+    TEAMS_SECURITY_WEBHOOK_URLS, or to the alert targets when that is not set."""
+    event = boundaries.record(sender.get("name"), sender.get("aadObjectId"), tools.redact(question), reason, stopped_by)
+    if event["notify"] and SECURITY_TARGETS:
+        _notify_pool.submit(post_card, SECURITY_TARGETS, cards.restricted_card(event))
+    return event
+
+
+def _refuse(sender: dict, question: str, reason: str, stopped_by: str) -> dict:
+    report_restricted(sender, question, reason, stopped_by)
+    return _reply(boundaries.REFUSAL)
+
+
+def _failure(e: Exception) -> str:
+    """What the person who asked sees when something breaks: the Kubernetes status at most. The raw
+    error can name the AI provider or kubesupport's service account, so it only goes to the log."""
+    status = getattr(e, "status", None)
+    if status:
+        return f"Sorry, that failed: Kubernetes answered {status} {getattr(e, 'reason', None) or ''}".rstrip() + "."
+    return f"Sorry, that failed ({type(e).__name__}). The administrators can find the reason in the log."
+
+
+def _late_quick_result(f, sender: dict, question: str) -> str:
+    """Text for a quick command that finished after Teams' 5-second limit."""
+    e = f.exception()
+    if isinstance(e, boundaries.RestrictedAccess):
+        report_restricted(sender, question, str(e), e.stopped_by)
+        return boundaries.REFUSAL
+    if isinstance(e, ValueError):
+        return str(e)
+    if e:
+        logger.error("Teams quick command failed: %s: %s", type(e).__name__, e)
+        return _failure(e)
+    return f.result()
+
+
+def _deliver_later(future, sender: dict, question: str, is_rca: bool, thread: dict | None = None):
     """Post the result of slow work to the channel's Workflows webhook, with the question's thread."""
+    asked_by = sender.get("name")
+
     def done(f):
         try:
             result = f.result()
+            if not is_rca and boundaries.is_refusal(str(result)):  # the AI's own rule: only the refusal is shown
+                report_restricted(sender, question, boundaries.REASON_AI, "AI rule")
+                result = boundaries.REFUSAL
             card = cards.rca_card(result, asked_by, question) if is_rca else \
                 cards.answer_card(question, asked_by, str(result))
+        except boundaries.RestrictedAccess as e:
+            report_restricted(sender, question, str(e), e.stopped_by)
+            card = cards.answer_card(question, asked_by, boundaries.REFUSAL)
         except Exception as e:
             logger.exception("Teams request failed")
-            card = cards.answer_card(question, asked_by, f"Sorry, that failed: {type(e).__name__}: {e}")
+            card = cards.answer_card(question, asked_by, _failure(e))
         post_card(REPLY_TARGET, card, thread)
     future.add_done_callback(done)
 
@@ -378,6 +437,12 @@ def handle_outgoing(activity: dict) -> dict:
     if cmd == "help":
         return _reply(HELP)
 
+    # Boundaries, layer 1: a question about kubesupport itself is refused and reported before any work
+    if cmd in ("ask", "rca"):
+        reason = boundaries.restricted_question(text)
+        if reason:
+            return _refuse(sender, text, reason, "question filter")
+
     quick = {
         "status": lambda: _status_text(),
         "incidents": lambda: _status_text(),
@@ -388,33 +453,35 @@ def handle_outgoing(activity: dict) -> dict:
         "activity": lambda: _activity_text(),
     }
     if cmd in quick:
-        future = _pool.submit(quick[cmd])
+        future = _pool.submit(_as_teams_user, quick[cmd])
         try:
             return _reply(future.result(timeout=QUICK_TIMEOUT_SECONDS))
         except FutureTimeout:
             if not REPLY_TARGET:
                 return _reply("That's taking longer than Teams allows, and no reply webhook is set up.")
             future.add_done_callback(lambda f: post_card(REPLY_TARGET, cards.answer_card(
-                text, asked_by, f.result() if not f.exception() else f"Failed: {f.exception()}"), thread))
+                text, asked_by, _late_quick_result(f, sender, text)), thread))
             return _reply("Still working on it; the result will follow shortly.")
+        except boundaries.RestrictedAccess as e:  # layer 2: kubesupport's own namespace or objects
+            return _refuse(sender, text, str(e), e.stopped_by)
         except ValueError as e:  # bad arguments or a namespace outside the allowlist
             return _reply(str(e))
         except Exception as e:
             logger.exception("Teams quick command failed")
-            return _reply(f"Sorry, that failed: {type(e).__name__}: {e}")
+            return _reply(_failure(e))
 
     # Slow work: AI questions and RCAs
     if cmd == "ask" and not agent.llm:
-        return _reply("No AI model is configured for this agent (LLM_PROVIDER and LLM_API_KEY), "
-                      "so I can only run commands.\n\n" + HELP)
+        return _reply("No AI model is configured, so I can only run commands.\n\n" + HELP)
     if not REPLY_TARGET:
-        return _reply("I need a Teams reply webhook (TEAMS_REPLY_WEBHOOK_URL) to send answers that take "
-                      "longer than a few seconds. Commands like `status` and `pods <namespace>` still work.")
-    future = _submit_slow(_run_rca, args) if cmd == "rca" else _submit_slow(answer_in_session, conv_id, text)
+        return _reply("I can't send answers that take longer than a few seconds: no reply webhook is set up "
+                      "(ask an administrator). Commands like `status` and `pods <namespace>` still work.")
+    job = (_run_rca, args) if cmd == "rca" else (answer_in_session, conv_id, text)
+    future = _submit_slow(_as_teams_user, *job)
     if future is None:
         return _reply("I'm busy with other investigations right now. Please ask again in a few minutes; "
                       "quick commands such as `status` still work.")
-    _deliver_later(future, asked_by, text, is_rca=cmd == "rca", thread=thread)
+    _deliver_later(future, sender, text, is_rca=cmd == "rca", thread=thread)
     return _reply("Looking into it - the answer will follow shortly.")
 
 

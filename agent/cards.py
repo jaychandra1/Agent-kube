@@ -6,6 +6,10 @@ with every Teams client. Text is truncated so a card stays under Teams' ~28 KB l
 """
 import json
 import os
+import re
+
+import boundaries
+import timefmt
 
 CLUSTER_NAME = os.getenv("CLUSTER_NAME", "").strip()
 MAX_CARD_BYTES = 24000
@@ -67,6 +71,13 @@ def _header(title: str, severity: str | None, subtitle: str | None = None) -> di
     return {"type": "Container", "style": SEV_STYLE.get(severity or "", "emphasis"), "items": items}
 
 
+def _engine(rca: dict) -> str:
+    """Who wrote an RCA, without naming the AI provider or model: that is part of kubesupport's
+    setup (boundaries.py). The full value stays in the API response and the log."""
+    by = str(rca.get("generated_by") or "?")
+    return "AI model" if by.startswith("llm:") else "built-in rules" if by == "heuristic" else by
+
+
 def alert_card(incident: dict, rca: dict | None, reminder: bool = False) -> dict:
     """New-incident (or reminder) alert, with the RCA summary when there is one."""
     sev = (rca or {}).get("severity", "SEV2")
@@ -88,10 +99,10 @@ def alert_card(incident: dict, rca: dict | None, reminder: bool = False) -> dict
             _text(rca.get("root_cause"), 1200),
             _text("What to do", weight="Bolder", spacing="Medium"),
             _bullets(rca.get("resolution")),
-            _text(f"Confidence: {rca.get('confidence', '?')} - engine: {rca.get('generated_by', '?')}",
+            _text(f"Confidence: {rca.get('confidence', '?')} - engine: {_engine(rca)}",
                   200, isSubtle=True, size="Small"),
         ]
-    if incident.get("pod"):
+    if incident.get("pod") and not boundaries.is_protected(incident.get("namespace")):  # that one would be refused
         body.append(_text(f"Ask in Teams: @kubesupport rca {incident['namespace']}/{incident['pod']}",
                           300, isSubtle=True, size="Small"))
     return card(body)
@@ -138,15 +149,64 @@ def rca_card(rca: dict, asked_by: str | None = None, question: str | None = None
         for e in evidence[:3]:
             body.append(_text(f"{e.get('source')}:\n{_t(e.get('excerpt'), 600)}", 700, fontType="Monospace",
                               size="Small"))
-    body.append(_text(f"Engine: {rca.get('generated_by', '?')}", 200, isSubtle=True, size="Small"))
+    body.append(_text(f"Engine: {_engine(rca)}", 200, isSubtle=True, size="Small"))
     return card(body)
+
+
+def restricted_card(event: dict) -> dict:
+    """For the administrators: who asked kubesupport about itself, what they asked, and why it
+    was refused (an event from boundaries.record)."""
+    question = (event.get("question") or "(empty)").replace("](", "] (")  # no hidden links in an admin channel
+    body = [
+        _header("Restricted question refused", "SEV2",
+                "Someone asked kubesupport about itself and was told they are not authorised"),
+        _facts([
+            ("Asked by", event.get("user")),
+            ("User ID", event.get("user_id")),
+            ("When", timefmt.fmt(event.get("time"))),
+            ("Why", event.get("reason")),
+            ("Stopped by", event.get("stopped_by")),
+        ]),
+        _text("Question", weight="Bolder", spacing="Medium"),
+        _text(question, 700),
+    ]
+    if event.get("last_card_this_hour"):
+        body.append(_text(f"That was card {boundaries.MAX_CARDS_PER_HOUR} within an hour. Further refusals in this hour "
+                          "are only logged and kept in the list (GET /security/restricted).", 300, isSubtle=True))
+    return card(body)
+
+
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)[\s#]*$")
+_OFFER = re.compile(r"^(if you(?:'d| would)? (?:want|like|need)|let me know|would you like|i can also|feel free)", re.I)
+
+
+def tidy_answer(text: str) -> str:
+    """Make an AI answer easy to scan in a Teams card:
+    - Markdown headings become bold lines (Teams draws "# ..." as a huge title);
+    - a closing offer ("If you want ...", "Let me know ...") is dropped;
+    - runs of blank lines are collapsed.
+    Tables and code blocks are left exactly as they are."""
+    lines, in_code = [], False
+    for line in (text or "").strip().splitlines():
+        if line.strip().startswith("```"):
+            in_code = not in_code
+        heading = None if in_code else _HEADING.match(line)
+        if heading:
+            line = f"**{heading.group(1).strip().strip('*').strip()}**"
+        if line.strip() or (lines and lines[-1].strip()):  # at most one blank line in a row
+            lines.append(line.rstrip())
+    paragraphs = "\n".join(lines).strip().split("\n\n")
+    last = paragraphs[-1].strip()
+    if len(paragraphs) > 1 and _OFFER.match(last) and "|" not in last and "```" not in last and len(last.split()) <= 40:
+        paragraphs.pop()
+    return "\n\n".join(paragraphs).strip()
 
 
 def answer_card(question: str, asked_by: str | None, answer: str) -> dict:
     return card([
         _header("kubesupport answer", None, f"Asked by {asked_by or 'someone'}"),
         _text(f"> {question}", 400, isSubtle=True),
-        _text(answer, 12000),
+        _text(tidy_answer(answer), 12000),
     ])
 
 

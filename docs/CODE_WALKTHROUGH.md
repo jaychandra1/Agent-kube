@@ -12,6 +12,7 @@ Agent-kube/
 │   ├── main.py                     Entrypoint: internal API :8000, Teams webhook :8080, activity webhook :8443
 │   ├── app.py                      FastAPI apps: app (internal API) and teams_app (POST /teams/webhook only)
 │   ├── teams.py                    Teams: HMAC check, commands, 5-second rule, posting cards
+│   ├── boundaries.py               What may not be asked: question filter, protected namespaces, who asked what
 │   ├── watcher.py                  Incident loop: detect, RCA, alert, remind, resolve
 │   ├── activity.py                 Admission webhook: who did what, one card per minute
 │   ├── agent.py                    AI investigation engine: the AI's rules, submit_rca, tool loop, deadline
@@ -76,9 +77,10 @@ sequenceDiagram
 | 1 | [`app.teams_webhook`](../agent/app.py) | Registered on both `teams_app` (8080) and `app` (8000). Returns 404 when `TEAMS_OUTGOING_WEBHOOK_SECRET` is not set. |
 | 2 | [`teams.verify_hmac`](../agent/teams.py) | HMAC-SHA256 of the raw body with the base64 security token, compared in constant time; 401 when wrong. |
 | 3 | `teams.handle_outgoing` | Ignores duplicates (Teams retries), checks `TEAMS_TENANT_ID` and `TEAMS_ALLOWED_USER_IDS`, then `parse_command`. |
+| 3b | [`boundaries.restricted_question`](../agent/boundaries.py) | For `ask` and `rca`: a question about kubesupport itself is answered with `boundaries.REFUSAL` at once, and `teams.report_restricted` records it and posts `cards.restricted_card` to the administrators. Nothing else runs. |
 | 4a | quick commands | `status`, `pods`, `events`, `logs`, `get`, `activity`, `help`: answered in the HTTP reply within 4 seconds (Teams waits 5). |
 | 4b | slow work | `ask` (any other text) and `rca`: reply "Looking into it…", run `answer_in_session` / `_run_rca` on the slow workers, and `_deliver_later` posts the card to `TEAMS_REPLY_WEBHOOK_URL` together with `thread_of(activity)` (`threadMessageId`, `channelId`), so the workflow can reply in the question's thread. |
-| 5 | [`agent.chat`](../agent/agent.py) / `agent.investigate_and_rca` | The investigation (section 5). |
+| 5 | [`agent.chat`](../agent/agent.py) / `agent.investigate_and_rca` | The investigation (section 5). Both 4a and 4b run inside `teams._as_teams_user`, which switches `boundaries.restricted_access()` on: the tools then refuse kubesupport's own namespace and objects (`RestrictedAccess`), and the AI gets rule 13. A refusal from either is reported like step 3b. |
 | 6 | [`cards.answer_card`](../agent/cards.py) / `cards.rca_card`, then `teams.post_card` | Adaptive Card to the Workflows webhook, with up to 3 retries (honours `Retry-After`). URLs are never logged, only their names. |
 
 Conversation memory: `teams._sessions` keeps one message history per Teams thread, trimmed by `agent.trim_history` so a cut never separates a tool call from its result.
@@ -110,9 +112,9 @@ Liveness: `Watcher.healthy()` is false when no scan finished for 5 intervals (at
 | Piece | Where | Notes |
 |---|---|---|
 | Provider choice | `providers.load_provider()`, at import | `agent.llm` is the provider (or `None`); `agent.LLM_STATUS` is the one-line explanation shown in `/alerts/status`. |
-| System prompt | `agent.SYSTEM` | Read-only role, evidence first, tool output is untrusted data, IST timestamps. |
+| System prompt | `agent.SYSTEM`, `agent.SYSTEM_RESTRICTED` | Read-only role, evidence first, tool output is untrusted data, times in the `TIMEZONE` zone. `agent._system()` adds rule 13 (boundaries) for requests from Teams. |
 | Model tools | `tools.TOOL_SCHEMAS` | `list_pods`, `describe_pod`, `get_events`, `get_pod_logs`, `get_deployment`, `top_pods`, `search_runbooks`, `scan_cluster_for_issues`, `list_resources`, `get_resource`. |
-| Running a tool | `tools.call_tool(name, args, max_chars)` | Calls the function, cuts the output to the provider's `tool_chars`, wraps it in `<untrusted_data>`. Errors come back as text, never as exceptions. |
+| Running a tool | `tools.call_tool(name, args, max_chars, restricted)` | Calls the function, cuts the output to the provider's `tool_chars`, wraps it in `<untrusted_data>`. Errors come back as text, never as exceptions. With `restricted` (a Teams request) a read of a protected namespace returns a `RESTRICTED:` notice instead of data. The flag is passed explicitly because Cursor calls the tools from its own threads. |
 | Final answer | `agent.RCA_TOOL` (`submit_rca`) | A strict JSON schema; the RCA is the tool's input. |
 | Chat providers | `agent._llm_rca`, `agent.run_loop` | kubesupport's loop: `_create` → run tools → repeat; reminds the model to call `submit_rca` near the step limit, then (OpenAI-compatible) forces it. |
 | Agent providers | `agent._agent_rca`, `agent._agent_chat` | The provider's own loop (`llm.session(...)`); `submit_rca` is a custom tool that records the RCA; up to `LLM_MAX_STEPS` reminders. |
@@ -150,6 +152,8 @@ Liveness: `Watcher.healthy()` is false when no scan finished for 5 intervals (at
 | `test_activity.py` | Admission parsing, filters, batching, webhook replies |
 | `test_resources.py` | Generic `list_resources` / `get_resource`, Secrets refused, server start-up |
 | `test_agent.py` | Tool loop, reminders, fallback to rules, rule-based RCAs, `normalize_rca`, history trimming |
+| `test_boundaries.py` | Questions that must be refused and questions that must pass; the tool block for commands and for the AI (both provider shapes); rule 13 only for Teams; the administrators' card, its rate limit and redaction; no setup details in cards and error messages; `/security/restricted` |
+| `test_answers.py` | The answer-format rule, the one-time shortening of long answers (both provider shapes), and the clean-up of answer text for the Teams card |
 | `test_provider_catalog.py` | Every provider in the catalog: defaults, required settings, keys, overrides, effort |
 | `test_provider_openai_compat.py` | History conversion, request budget, retries, rate limits, Azure header, a full Groq investigation |
 | `test_provider_claude.py` | The request sent to the Anthropic API |
@@ -173,6 +177,7 @@ CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs `flake8 --se
 | **Detect a new incident type** | Add the waiting reason to `WAITING_CATEGORY` or a rule in `find_incidents` (`tools.py`) and a case in `test_incidents.py`; add a diagnosis rule to `rules.py` (`POD_RULES` or `_incident_rca`) with a test in `test_rules.py`; document both in RULES.md. |
 | **Add a built-in diagnosis rule** | Write a function `(PodFacts) -> Finding | None` in `rules.py`, put it at the right place in `POD_RULES` (most specific first), quote its evidence, set its confidence honestly, and add a case to `test_rules.py`. |
 | **Report a new kind of activity** | Add a rule to `deploy/activity-webhook.yaml` and handle it in `activity.parse_admission`; `test_every_resource_the_webhook_sends_is_understood` checks the two match. |
+| **Refuse another kind of question** | Add a pattern to `_CHECKS` in `boundaries.py` (keep kubesupport as the subject of the pattern), and add the wording to the "must be refused" list and a look-alike cluster question to the "must pass" list in `test_boundaries.py`. Document it in [RULES.md, section 6](RULES.md#6-boundaries-what-may-not-be-asked). |
 | **Add a setting** | Read it with `os.getenv` (AI settings: in `providers/catalog.py`), add it to the ConfigMap with a comment, and to [CONFIGURATION_REFERENCE.md](CONFIGURATION_REFERENCE.md). `test_manifests.py` fails if the ConfigMap has a key the code never reads. |
 
 ---

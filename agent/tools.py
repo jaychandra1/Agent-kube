@@ -4,6 +4,8 @@ import os, re, glob, json, logging
 from datetime import datetime, timezone
 from kubernetes import client, config
 
+import boundaries
+
 logger = logging.getLogger("kubesupport.tools")
 
 def init_k8s_client():
@@ -58,6 +60,7 @@ def _valid(name, what="name") -> str:
 def _ns(ns: str):
     if not isinstance(ns, str) or not _DNS_LABEL.match(ns):
         raise ValueError(f"invalid namespace '{ns}'")
+    boundaries.check(namespace=ns)  # Teams users never read kubesupport's own namespace
     if "*" not in ALLOWED and ns not in ALLOWED:
         raise ValueError(f"namespace '{ns}' not allowed; allowed: {sorted(ALLOWED)}")
 
@@ -226,6 +229,8 @@ def scan_cluster_for_issues():
     """Scans all allowed namespaces and identifies any pods in CrashLoopBackOff, Error, OOMKilled, or high restart count."""
     issues = []
     for ns, pods in pods_by_namespace().items():
+        if boundaries.blocks(namespace=ns):
+            continue
         try:
             for p in pods:
                 cs = p.status.container_statuses or []
@@ -399,6 +404,8 @@ def list_resources(kind, namespace=None):
     else:
         results = [r.get(**page)]
     items = [item.to_dict() for res in results for item in (res.items or [])]
+    items = [obj for obj in items if not boundaries.blocks((obj.get("metadata") or {}).get("namespace"),
+                                                           (obj.get("metadata") or {}).get("name"))]
     rows = []
     for obj in items[:MAX_LIST_ITEMS]:
         meta = obj.get("metadata") or {}
@@ -437,7 +444,12 @@ def get_resource(kind, name, namespace=None):
         _ns(namespace)
         obj = r.get(name=_valid(name), namespace=namespace, _request_timeout=K8S_TIMEOUT).to_dict()
     else:
-        obj = r.get(name=_valid(name), _request_timeout=K8S_TIMEOUT).to_dict()
+        boundaries.check(name=_valid(name))  # kubesupport's own cluster-wide objects (roles, webhook, namespace)
+        obj = r.get(name=name, _request_timeout=K8S_TIMEOUT).to_dict()
+        if boundaries.is_restricted() and r.kind == "Node":  # a node lists the images of every pod on it
+            status = obj.get("status") or {}
+            if status.get("images"):
+                status["images"] = [i for i in status["images"] if not boundaries.mentions_protected(json.dumps(i))]
     _hide_env_values(obj)
     meta = obj.get("metadata") or {}
     meta.pop("managedFields", None)
@@ -478,14 +490,23 @@ TOOLS = {
 
 TOOL_SCHEMAS = [{"name": n, "description": d, "input_schema": s} for n, (_, d, s) in TOOLS.items()]
 
-def call_tool(name: str, args: dict, max_chars: int = 15000) -> str:
+def call_tool(name: str, args: dict, max_chars: int = 15000, restricted: bool | None = None) -> str:
     """Run one tool for the model. Output is cut to `max_chars` (smaller for models with
-    tight token limits, such as Groq's) and marked as untrusted data."""
+    tight token limits, such as Groq's) and marked as untrusted data.
+    `restricted` switches the boundaries on for this call (see boundaries.py); None keeps what
+    the calling thread has. A blocked call returns a notice for the model instead of data."""
+    restricted = boundaries.is_restricted() if restricted is None else restricted
     try:
-        result = TOOLS[name][0](**args)
+        with boundaries.restricted_access(restricted):
+            result = TOOLS[name][0](**args)
+    except boundaries.RestrictedAccess as e:
+        logger.info("Blocked tool call %s: %s", name, e)
+        return boundaries.tool_notice(e)
     except Exception as e:
         result = {"error": f"{type(e).__name__}: {e}"}
     text = result if isinstance(result, str) else json.dumps(result, default=str)
+    with boundaries.restricted_access(restricted):
+        text = boundaries.scrub(text)
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n... [cut: {len(text) - max_chars} more characters]"
     return f"<untrusted_data>\n{text}\n</untrusted_data>"
