@@ -208,6 +208,18 @@ Want alerts in a channel too, including a private one? See 4.4. You can give the
 
    For security, make it a **private team** with only the people who may ask kubesupport as members: only a team's members can @mention its outgoing webhook (8.5).
 2. In that channel: **…** → **Workflows** → **"Send webhook alerts to a channel"** → select that team and channel → **Create** → **copy the URL**. 📝 **T2**
+3. **Make answers appear under the question (same thread).** As created, this workflow starts a *new post* for every answer. kubesupport sends the question's thread with each answer (the field `threadMessageId`), so change the workflow's last step once:
+   1. In Teams, open the **Workflows** app, find the workflow from step 2 and choose **Edit**.
+   2. Open the step **Send each adaptive card**. Inside it is the action **Post card in a chat or channel**. Delete that action.
+   3. In its place, add the Microsoft Teams action **Reply with an adaptive card in a channel** and fill in:
+      - **Post as:** `Flow bot`
+      - **Post in:** `Channel`
+      - **Team** and **Channel:** your team and the questions channel
+      - **Message ID:** switch the field to **Expression** and enter `triggerBody()?['threadMessageId']`
+      - **Adaptive Card:** switch to **Expression** and enter `items('Send_each_adaptive_card')?['content']`
+   4. **Save**.
+
+   Use this workflow **only for answers** (T2). The alert workflows (T1, T4) keep **Post card in a chat or channel**: an alert doesn't belong to a thread. The field names above are how the designer showed them when this was written; if yours differ slightly, the two expressions are what matters.
 
 ### 4.3 The outgoing webhook (questions) → T3
 
@@ -288,7 +300,7 @@ kubectl -n kubesupport create secret generic kubesupport-secrets \
 | `LLM_API_KEY` | The API key of the AI provider chosen with `LLM_PROVIDER` (5.1). The provider's own variable name (e.g. `GROQ_API_KEY`, `CURSOR_API_KEY`) works too. | Rule-based RCAs only; free-form questions are refused |
 | `AGENT_API_KEY` | Protects the internal API (`/alerts/test`, `/rca`, …) and is needed for the checks in Step 9 | Internal API off (answers 403) |
 | `TEAMS_ALERT_WEBHOOK_URLS` | Where alerts go: chats, standard or private channels. Comma-separated; each entry `name=URL` (name optional, shown in logs and test results instead of the secret URL). Leave out `,oncall-private=<T4>` if you skipped 4.4. | No alerts sent |
-| `TEAMS_REPLY_WEBHOOK_URL` | Where slow answers go (questions channel) | Uses the first alert URL |
+| `TEAMS_REPLY_WEBHOOK_URL` | Where slow answers go (questions channel). With the workflow change in 4.2, they land in the question's thread. | Uses the first alert URL |
 | `TEAMS_OUTGOING_WEBHOOK_SECRET` | Verifies questions come from your Teams webhook | `/teams/webhook` switched off |
 
 Switching provider later? Put the new key in `LLM_API_KEY` (Step 10, *Change a secret*) and change `LLM_PROVIDER` in the ConfigMap.
@@ -607,7 +619,8 @@ In the channel from 4.2, type `@`, pick **kubesupport**, then try:
 1. `@kubesupport help`: the command list appears in the thread within seconds.
 2. `@kubesupport status`: open incidents.
 3. `@kubesupport pods <namespace>`: a pod table.
-4. `@kubesupport is anything unhealthy in <namespace>?`: "Looking into it…", then an answer card in the channel. This needs W8. On a free plan (Groq, Gemini) the answer can take a few minutes.
+4. `@kubesupport is anything unhealthy in <namespace>?`: "Looking into it…", then an answer card **in the same thread** (if you did 4.2 step 3; otherwise as a new post in the channel). This needs W8. On a free plan (Groq, Gemini) the answer can take a few minutes.
+5. `@kubesupport which ingress URLs does the cluster expose?`: the real URLs, backends and load balancer addresses, not instructions. (`@kubesupport get ingresses` gives the same list at once, without the AI.)
 
 ### 9.3 A real incident
 
@@ -665,7 +678,9 @@ Everything after installation (new images, changing settings and secrets, switch
 | `404` instead of `401` | `TEAMS_OUTGOING_WEBHOOK_SECRET` isn't in the Secret, or the pod wasn't restarted after adding it; or the route's Path doesn't match `/teams/webhook` (8.2) |
 | A teammate gets "not on this agent's allowed-users list" | Add their Entra Object ID to `TEAMS_ALLOWED_USER_IDS` (8.5), apply, restart |
 | Teams says "Sorry, there was a problem…" after `@kubesupport` | Wrong token (agent log: `Rejected /teams/webhook call`), or the URL isn't reachable |
-| "Looking into it…" but no answer card | `TEAMS_REPLY_WEBHOOK_URL` wrong, or that workflow is off (agent log: `Teams webhook … returned …`) |
+| "Looking into it…" but no answer card | `TEAMS_REPLY_WEBHOOK_URL` wrong, or that workflow is off (agent log: `Teams target … returned …`). After the thread change (4.2 step 3), also open the workflow's **run history**: a failed **Reply with an adaptive card** step shows why (wrong Team/Channel, or the Message ID expression mistyped). |
+| Answers arrive as a new post instead of in the question's thread | The answers workflow still uses **Post card in a chat or channel**: do 4.2 step 3. kubesupport already sends `threadMessageId`. |
+| The AI answers with `kubectl` commands, or says it "could not run any cluster tools" | An older image, in which the Cursor agent had no access to kubesupport's tools. Deploy the current image (Step 10). If it persists, the agent log has a warning `still used no cluster tool`. |
 | "namespace … not allowed" | Add it to `ALLOWED_NAMESPACES` (or set it to `"*"`) |
 | Answers say "No AI model is configured" | `LLM_PROVIDER` is `none` or misspelled, or the key/model/endpoint it needs is missing. `/alerts/status` → `llm.status` says exactly what; so does the agent log at startup (`No AI model (…)`). Restart the pod after changing the Secret. |
 | RCAs say `generated_by: heuristic` although a key is set | See `llm_error` in a `/rca` response. Possible causes: wrong key; the provider's daily limit used up (`rate limit, retry after …`); `MAX_LLM_RCA_PER_HOUR` reached; outbound HTTPS to the provider blocked. Per-provider notes: [docs/AI_PROVIDERS.md](AI_PROVIDERS.md#troubleshooting) |

@@ -8,7 +8,7 @@ import pytest
 
 import agent
 import teams
-from conftest import TEST_SECRET, fake_llm
+from conftest import SAMPLE_RCA, TEST_SECRET, fake_llm
 
 
 def sign(body: bytes) -> str:
@@ -19,15 +19,18 @@ def sign(body: bytes) -> str:
 @pytest.fixture
 def posted(monkeypatch):
     calls = []
-    monkeypatch.setattr(teams, "post_card", lambda url, card: calls.append((url, card)) or [])
+    monkeypatch.setattr(teams, "post_card", lambda url, card, thread=None: calls.append((url, card, thread)) or [])
     return calls
 
 
 def activity(text, msg_id=None, tenant="t1", aad="u1"):
     return {"type": "message", "id": msg_id or str(uuid.uuid4()), "text": text,
             "from": {"name": "Asha", "aadObjectId": aad},
-            "conversation": {"id": "19:abc@thread.tacv2;messageid=1"},
-            "channelData": {"tenant": {"id": tenant}}}
+            "conversation": {"id": "19:abc@thread.tacv2;messageid=1731916515731"},
+            "channelData": {"tenant": {"id": tenant}, "channel": {"id": "19:abc@thread.tacv2"}}}
+
+
+THREAD = {"threadMessageId": "1731916515731", "channelId": "19:abc@thread.tacv2"}
 
 
 def wait_for(predicate, seconds=3.0):
@@ -101,9 +104,42 @@ def test_question_is_answered_later_through_reply_webhook(monkeypatch, posted):
     reply = teams.handle_outgoing(activity("<at>kubesupport</at> why is web down?"))
     assert reply["text"].startswith("Looking into it")
     assert wait_for(lambda: posted)
-    target, card = posted[0]
+    target, card, thread = posted[0]
     assert target == ("reply-1", "https://example.invalid/reply")
     assert "answer to: why is web down?" in str(card)
+    assert thread == THREAD  # the answer says which thread it belongs to
+
+
+def test_rca_answer_carries_the_thread_too(monkeypatch, posted):
+    monkeypatch.setattr(agent, "investigate_and_rca", lambda *a, **k: dict(SAMPLE_RCA, generated_by="test"))
+    teams.handle_outgoing(activity("<at>kubesupport</at> rca checkout returns 500"))
+    assert wait_for(lambda: posted) and posted[0][2] == THREAD
+
+
+def test_thread_is_found_for_replies_and_odd_payloads():
+    reply_in_thread = {"id": "1731916599999", "replyToId": "1731916515731",
+                       "conversation": {"id": "19:abc@thread.tacv2;messageid=1731916515731"}}
+    assert teams.thread_of(reply_in_thread) == THREAD  # the thread's first message, not the reply
+    assert teams.thread_of({"id": "42", "conversation": {"id": "19:abc@thread.tacv2"}}) == {
+        "threadMessageId": "42", "channelId": "19:abc@thread.tacv2"}
+    assert teams.thread_of({}) == {}
+
+
+def test_thread_is_sent_to_the_workflow(monkeypatch):
+    sent = []
+    monkeypatch.setattr(teams.requests, "post",
+                        lambda url, json=None, timeout=None: sent.append(json) or FakeResponse(202))
+    teams.post_card(("reply-1", "https://a"), dict(CARD), THREAD)
+    teams.post_card(("chat", "https://a"), dict(CARD))
+    assert sent[0]["threadMessageId"] == "1731916515731" and sent[0]["channelId"] == "19:abc@thread.tacv2"
+    assert sent[0]["type"] == "message" and sent[0]["attachments"][0]["content"]["type"] == "AdaptiveCard"
+    assert "threadMessageId" not in sent[1]  # alerts aren't answers: no thread
+
+
+def test_mention_in_the_middle_leaves_clean_text():
+    assert teams.strip_mentions("Hi <at>KubeSupport</at>, can you list the ingresses?") == \
+        "Hi, can you list the ingresses?"
+    assert teams.strip_mentions("<at>kubesupport</at> logs apps/web-1 --previous") == "logs apps/web-1 --previous"
 
 
 def test_slow_quick_command_falls_back_to_reply_webhook(monkeypatch, posted):
@@ -111,7 +147,7 @@ def test_slow_quick_command_falls_back_to_reply_webhook(monkeypatch, posted):
     monkeypatch.setattr(teams, "_status_text", lambda: time.sleep(0.3) or "all good")
     reply = teams.handle_outgoing(activity("<at>kubesupport</at> status"))
     assert reply["text"].startswith("Still working")
-    assert wait_for(lambda: posted) and "all good" in str(posted[0][1])
+    assert wait_for(lambda: posted) and "all good" in str(posted[0][1]) and posted[0][2] == THREAD
 
 
 SECRET_URL = "https://example.invalid/workflows/abc/invoke?sig=TOP-SECRET-SIGNATURE"

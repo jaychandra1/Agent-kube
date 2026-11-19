@@ -310,15 +310,66 @@ def _age_minutes(created) -> int | None:
         return None
 
 
+MAX_INGRESS_ROUTES = 15
+
+
+def _lb_addresses(status: dict) -> list[str]:
+    """Hostnames or IPs a load balancer assigned (Service or Ingress status)."""
+    return [i.get("hostname") or i.get("ip") for i in ((status.get("loadBalancer") or {}).get("ingress") or [])
+            if i.get("hostname") or i.get("ip")]
+
+
+def _backend(backend: dict | None) -> str:
+    service = (backend or {}).get("service") or {}
+    if not service:
+        resource = (backend or {}).get("resource") or {}
+        return f"{resource.get('kind', '?')}/{resource.get('name', '?')}" if resource else "?"
+    port = service.get("port") or {}
+    return f"{service.get('name', '?')}:{port.get('number') or port.get('name') or '?'}"
+
+
+def _ingress_summary(obj: dict) -> str:
+    """Everything an Ingress serves: class, load balancer address, and every URL with the
+    service it goes to, e.g. 'https://shop.example.com/api -> api:8080'."""
+    spec, status = obj.get("spec") or {}, obj.get("status") or {}
+    annotations = (obj.get("metadata") or {}).get("annotations") or {}
+    tls_hosts = [h for t in spec.get("tls") or [] for h in t.get("hosts") or []]
+    # ALB ingresses terminate HTTPS with an ACM certificate named in annotations, not in spec.tls
+    alb_https = (any(k.endswith("/certificate-arn") for k in annotations)
+                 or "HTTPS" in annotations.get("alb.ingress.kubernetes.io/listen-ports", ""))
+
+    def scheme(host: str) -> str:
+        covered = any(host == t or (t.startswith("*.") and host.endswith(t[1:])) for t in tls_hosts)
+        return "https" if covered or alb_https or (spec.get("tls") and not tls_hosts) else "http"
+
+    routes = []
+    for rule in spec.get("rules") or []:
+        host = rule.get("host") or "*"
+        for path in (rule.get("http") or {}).get("paths") or []:
+            routes.append(f"{scheme(host)}://{host}{path.get('path') or '/'} -> {_backend(path.get('backend'))}")
+    if spec.get("defaultBackend"):
+        routes.append(f"default backend -> {_backend(spec['defaultBackend'])}")
+    ingress_class = spec.get("ingressClassName") or annotations.get("kubernetes.io/ingress.class")
+    addresses = _lb_addresses(status)
+    parts = ([f"class {ingress_class}"] if ingress_class else []) + [
+        f"address {', '.join(addresses)}" if addresses else "address not assigned yet"]
+    parts += routes[:MAX_INGRESS_ROUTES] or ["no rules"]
+    if len(routes) > MAX_INGRESS_ROUTES:
+        parts.append(f"+{len(routes) - MAX_INGRESS_ROUTES} more routes")
+    return "; ".join(parts)
+
+
 def _summary(kind: str, obj: dict) -> str:
     """One line of status for common kinds; status.phase or ready conditions otherwise."""
     spec, status = obj.get("spec") or {}, obj.get("status") or {}
     if kind == "Service":
         ports = ",".join(f"{p.get('port')}/{p.get('protocol', 'TCP')}" for p in spec.get("ports") or [])
-        return f"{spec.get('type', 'ClusterIP')} {spec.get('clusterIP', '')} ports {ports}".strip()
+        text = f"{spec.get('type', 'ClusterIP')} {spec.get('clusterIP', '')} ports {ports}".strip()
+        external = (_lb_addresses(status) or list(spec.get("externalIPs") or [])
+                    or ([spec["externalName"]] if spec.get("externalName") else []))
+        return text + (f" external {', '.join(external)}" if external else "")
     if kind == "Ingress":
-        hosts = [r.get("host", "*") for r in spec.get("rules") or []]
-        return f"hosts {', '.join(hosts) or '*'}"
+        return _ingress_summary(obj)
     if kind in ("Deployment", "StatefulSet", "ReplicaSet"):
         return f"ready {status.get('readyReplicas', 0)}/{spec.get('replicas', 0)}"
     if kind == "DaemonSet":
@@ -413,8 +464,10 @@ TOOLS = {
     "scan_cluster_for_issues": (scan_cluster_for_issues, "Scan all allowlisted namespaces for failed/restarting pods.", _schema({}, [])),
     "list_resources": (list_resources,
                        "List objects of ANY kind in the cluster (services, ingresses, nodes, configmaps, jobs, cronjobs, "
-                       "statefulsets, PVCs, HPAs, namespaces, RBAC, CRDs, ...) with a short status. Omit namespace for "
-                       "all namespaces. Secrets are never available.",
+                       "statefulsets, PVCs, HPAs, namespaces, RBAC, CRDs, ...) with a short status. For ingresses the "
+                       "status holds the class, the load balancer address and every URL with its backend service; for "
+                       "services the type, ports and external address. Omit namespace for all namespaces. Secrets are "
+                       "never available.",
                        _schema({"kind": {"type": "string"}, "namespace": {"type": "string"}}, ["kind"])),
     "get_resource": (get_resource,
                      "Full definition and status of one object of any kind (not Secrets). Namespace is required for "

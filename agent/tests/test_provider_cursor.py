@@ -70,7 +70,10 @@ def test_cursor_agent_gets_only_kubesupport_tools(monkeypatch):
         session.send("hello")
     (a,) = sdk.created
     o = a.options
-    assert o.tools == [] and o.disallowed_tools == ["shell"]  # no built-in tools at all
+    # Cursor offers custom tools through its "mcp" group: that group only, and never the shell.
+    # (tools=[] would give the model no tools at all, so it could only answer in text.)
+    assert o.tools == ["mcp"] and o.disallowed_tools == ["shell"]
+    assert not hasattr(o, "mcp_servers")  # no other MCP server is configured
     assert o.model == "composer-2.5" and o.api_key == "cur-key"
     assert o.local.cwd == WORKDIR and o.local.setting_sources == []
     assert set(o.local.custom_tools) == {"list_pods"}
@@ -85,6 +88,7 @@ def test_system_prompt_goes_with_the_first_message_only(monkeypatch):
         session.send("second")
     first, second = sdk.created[0].sent
     assert first.startswith("SYS") and first.endswith("first") and second == "second"
+    assert "MCP tools" in first and "no shell and no kubectl" in first  # tells the agent where its tools are
 
 
 def test_tool_calls_reach_kubesupport_tools(monkeypatch):
@@ -92,6 +96,7 @@ def test_tool_calls_reach_kubesupport_tools(monkeypatch):
     sdk = fake_sdk(script=lambda a, text: a.call("list_pods", {"namespace": "apps"}))
     with provider(monkeypatch, sdk).session("SYS", TOOLS, lambda n, args: calls.append((n, args)) or "pods") as s:
         assert s.send("which pods?") == "pods"
+        assert s.tool_calls == 1
     assert calls == [("list_pods", {"namespace": "apps"})]
 
 
@@ -153,6 +158,33 @@ def test_no_submission_falls_back_to_rules(monkeypatch):
     rca = agent.investigate_and_rca("why?")
     assert rca["generated_by"] == "heuristic" and "without calling submit_rca" in rca["llm_error"]
     assert len(sdk.created[0].sent) == 1 + agent.llm.limits.steps  # first message + reminders
+
+
+def test_rca_without_reading_the_cluster_is_rejected(monkeypatch):
+    sdk = fake_sdk(script=lambda a, text: a.call("submit_rca", dict(SAMPLE_RCA)) and "Submitted.")
+    use_cursor(monkeypatch, sdk)
+    monkeypatch.setattr(agent, "generate_heuristic_rca", lambda **k: dict(SAMPLE_RCA))
+    rca = agent.investigate_and_rca("why?")
+    assert rca["generated_by"] == "heuristic" and "without reading the cluster" in rca["llm_error"]
+
+
+def test_instructions_instead_of_data_get_one_push_to_use_the_tools(monkeypatch):
+    def script(a, text):
+        if len(a.sent) == 1:
+            return "I could not run any cluster tools. Run: kubectl get ingress -A"
+        return "Ingresses: " + a.call("list_resources", {"kind": "ingress"})
+    sdk = fake_sdk(script=script)
+    use_cursor(monkeypatch, sdk)
+    answer = agent.chat([], "give me the ingress endpoints")
+    assert answer == "Ingresses: <untrusted_data>list_resources"
+    assert sdk.created[0].sent[1] == agent.TOOLS_NUDGE
+
+
+def test_plain_answers_are_not_pushed(monkeypatch):
+    sdk = fake_sdk(script=lambda a, text: "Hello! Ask me about the cluster.")
+    use_cursor(monkeypatch, sdk)
+    assert agent.chat([], "hi") == "Hello! Ask me about the cluster."
+    assert len(sdk.created[0].sent) == 1
 
 
 def test_chat_through_cursor_keeps_the_conversation(monkeypatch):

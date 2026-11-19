@@ -102,7 +102,9 @@ def test_rules_only_chat_lists_failing_pods(monkeypatch):
 def test_system_rules_are_production_ready():
     rules = agent.SYSTEM
     for must in ("read-only", "<untrusted_data>", "never say you did", "[REDACTED]", "SEV1", "Confidence: high",
-                 "roll back", agent.timefmt.TIMEZONE, "only answer questions about the cluster"):
+                 "roll back", agent.timefmt.TIMEZONE, "only answer questions about the cluster",
+                 "the only cluster you can see", "never ask which cluster", "Answer with real data",
+                 "Never answer with kubectl commands"):
         assert must in rules, must
     assert "Bitbucket" not in rules  # no instructions for tools kubesupport doesn't have
     tools = {t["name"] for t in agent.TOOL_SCHEMAS}

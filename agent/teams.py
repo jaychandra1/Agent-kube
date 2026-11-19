@@ -110,11 +110,13 @@ def _post_one(label: str, url: str, payload: dict) -> dict:
     return result
 
 
-def post_card(targets, adaptive_card: dict) -> list[dict]:
-    """POST a card to each (name, url) target. Never raises; returns one result per target."""
+def post_card(targets, adaptive_card: dict, thread: dict | None = None) -> list[dict]:
+    """POST a card to each (name, url) target. Never raises; returns one result per target.
+    `thread` (from thread_of) is added to the payload, so a workflow can reply in the thread
+    the question was asked in instead of starting a new post."""
     if isinstance(targets, tuple):
         targets = [targets]
-    payload = cards.message(adaptive_card)
+    payload = {**cards.message(adaptive_card), **(thread or {})}
     return [_post_one(label, url, payload) for label, url in (targets or [])]
 
 
@@ -142,11 +144,33 @@ def verify_hmac(raw_body: bytes, auth_header: str | None, secret_b64: str = None
 
 
 def strip_mentions(text: str) -> str:
-    """'<at>kubesupport</at>&nbsp;pods  web' -> 'pods web'"""
+    """'<at>kubesupport</at>&nbsp;pods  web' -> 'pods web'; 'Hi <at>kubesupport</at>, why?' -> 'Hi, why?'"""
     text = re.sub(r"<at>.*?</at>", " ", text or "", flags=re.S)
     text = re.sub(r"<[^>]+>", " ", text)  # Teams sends the message as HTML
     text = html.unescape(text).replace("\xa0", " ")
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r" ([,.?!])(?= |$)", r"\1", text).lstrip(",.?! ")
+
+
+_THREAD_ROOT = re.compile(r";messageid=(\d+)")
+
+
+def thread_of(activity: dict) -> dict:
+    """Where a question was asked, sent along with the answer: {"threadMessageId", "channelId"}.
+
+    In a channel, Teams gives the conversation id as "<channel id>;messageid=<id of the first
+    message of the thread>". A workflow can pass threadMessageId to the Teams action "Reply with
+    an adaptive card in a channel", which puts the answer under the question."""
+    conversation = str((activity.get("conversation") or {}).get("id") or "")
+    match = _THREAD_ROOT.search(conversation)
+    root = match.group(1) if match else (activity.get("replyToId") or activity.get("id"))
+    channel = ((activity.get("channelData") or {}).get("channel") or {}).get("id") or conversation.split(";")[0]
+    out = {}
+    if root:
+        out["threadMessageId"] = str(root)
+    if channel:
+        out["channelId"] = channel
+    return out
 
 
 def parse_command(text: str) -> tuple[str, list[str]]:
@@ -172,7 +196,7 @@ HELP = """**kubesupport** - mention me with one of these:
 - `rca <question>` - investigate a problem you describe
 - anything else - ask a question about the cluster in plain words
 
-Long answers (AI answers, RCA) arrive as a separate message in this channel."""
+Long answers (AI answers, RCA) follow a little later."""
 
 
 def _code(text: str) -> str:
@@ -313,8 +337,8 @@ def _reply(text: str) -> dict:
     return {"type": "message", "text": text}
 
 
-def _deliver_later(future, asked_by: str, question: str, is_rca: bool):
-    """Post the result of slow work to the channel's Workflows webhook."""
+def _deliver_later(future, asked_by: str, question: str, is_rca: bool, thread: dict | None = None):
+    """Post the result of slow work to the channel's Workflows webhook, with the question's thread."""
     def done(f):
         try:
             result = f.result()
@@ -323,7 +347,7 @@ def _deliver_later(future, asked_by: str, question: str, is_rca: bool):
         except Exception as e:
             logger.exception("Teams request failed")
             card = cards.answer_card(question, asked_by, f"Sorry, that failed: {type(e).__name__}: {e}")
-        post_card(REPLY_TARGET, card)
+        post_card(REPLY_TARGET, card, thread)
     future.add_done_callback(done)
 
 
@@ -348,6 +372,7 @@ def handle_outgoing(activity: dict) -> dict:
     cmd, args = parse_command(text)
     asked_by = sender.get("name")
     conv_id = (activity.get("conversation") or {}).get("id", "default")
+    thread = thread_of(activity)
     logger.info("Teams request from %s: %s", asked_by, cmd)
 
     if cmd == "help":
@@ -370,8 +395,8 @@ def handle_outgoing(activity: dict) -> dict:
             if not REPLY_TARGET:
                 return _reply("That's taking longer than Teams allows, and no reply webhook is set up.")
             future.add_done_callback(lambda f: post_card(REPLY_TARGET, cards.answer_card(
-                text, asked_by, f.result() if not f.exception() else f"Failed: {f.exception()}")))
-            return _reply("Still working on it; I'll post the result in this channel.")
+                text, asked_by, f.result() if not f.exception() else f"Failed: {f.exception()}"), thread))
+            return _reply("Still working on it; the result will follow shortly.")
         except ValueError as e:  # bad arguments or a namespace outside the allowlist
             return _reply(str(e))
         except Exception as e:
@@ -389,8 +414,8 @@ def handle_outgoing(activity: dict) -> dict:
     if future is None:
         return _reply("I'm busy with other investigations right now. Please ask again in a few minutes; "
                       "quick commands such as `status` still work.")
-    _deliver_later(future, asked_by, text, is_rca=cmd == "rca")
-    return _reply("Looking into it - I'll post the answer in this channel.")
+    _deliver_later(future, asked_by, text, is_rca=cmd == "rca", thread=thread)
+    return _reply("Looking into it - the answer will follow shortly.")
 
 
 def parse_body(raw_body: bytes) -> dict:

@@ -123,7 +123,7 @@ data:
   LOG_LEVEL: "INFO"                # DEBUG | INFO | WARNING | ERROR
   ALLOWED_NAMESPACES: "*"          # namespaces for incident alerts and Teams answers; "*" = all (permissions are cluster-wide either way)
   # ── AI model (docs/AI_PROVIDERS.md). The key goes in the Secret as LLM_API_KEY. ──
-  LLM_PROVIDER: "groq"             # EDIT: groq | anthropic | cursor | gemini | openai | azure-openai | openrouter | mistral | ollama | custom | none
+  LLM_PROVIDER: "cursor"             # EDIT: groq | anthropic | cursor | gemini | openai | azure-openai | openrouter | mistral | ollama | custom | none
   LLM_MODEL: ""                    # "" = the provider's default model (required for openai, azure-openai, ollama, custom)
   LLM_BASE_URL: ""                 # "" = the provider's default endpoint (required for azure-openai, ollama, custom)
   LLM_EFFORT: ""                   # "" = provider default; low | medium | high ("none" = don't send)

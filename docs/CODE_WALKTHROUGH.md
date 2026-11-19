@@ -76,7 +76,7 @@ sequenceDiagram
 | 2 | [`teams.verify_hmac`](../agent/teams.py) | HMAC-SHA256 of the raw body with the base64 security token, compared in constant time; 401 when wrong. |
 | 3 | `teams.handle_outgoing` | Ignores duplicates (Teams retries), checks `TEAMS_TENANT_ID` and `TEAMS_ALLOWED_USER_IDS`, then `parse_command`. |
 | 4a | quick commands | `status`, `pods`, `events`, `logs`, `get`, `activity`, `help`: answered in the HTTP reply within 4 seconds (Teams waits 5). |
-| 4b | slow work | `ask` (any other text) and `rca`: reply "Looking into it…", run `_answer_question` / `_run_rca` in a thread pool, and `_deliver_later` posts the card to `TEAMS_REPLY_WEBHOOK_URL`. |
+| 4b | slow work | `ask` (any other text) and `rca`: reply "Looking into it…", run `answer_in_session` / `_run_rca` on the slow workers, and `_deliver_later` posts the card to `TEAMS_REPLY_WEBHOOK_URL` together with `thread_of(activity)` (`threadMessageId`, `channelId`), so the workflow can reply in the question's thread. |
 | 5 | [`agent.chat`](../agent/agent.py) / `agent.investigate_and_rca` | The investigation (section 5). |
 | 6 | [`cards.answer_card`](../agent/cards.py) / `cards.rca_card`, then `teams.post_card` | Adaptive Card to the Workflows webhook, with up to 3 retries (honours `Retry-After`). URLs are never logged, only their names. |
 
@@ -152,7 +152,7 @@ Liveness: `Watcher.healthy()` is false when no scan finished for 5 intervals (at
 | `test_provider_catalog.py` | Every provider in the catalog: defaults, required settings, keys, overrides, effort |
 | `test_provider_openai_compat.py` | History conversion, request budget, retries, rate limits, Azure header, a full Groq investigation |
 | `test_provider_claude.py` | The request sent to the Anthropic API |
-| `test_provider_cursor.py` | Cursor with a fake SDK: no built-in tools, tool callbacks, RCA, reminders, chat, timeouts |
+| `test_provider_cursor.py` | Cursor with a fake SDK: only the `mcp` tool group, tool callbacks, RCA, reminders, RCAs without evidence rejected, the push to use tools, chat, timeouts |
 | `test_manifests.py` | `deploy/*.yaml`: names, read-only RBAC without Secrets, settings that exist in code, no keys in the ConfigMap, network policies, tunnel hardening |
 | `test_rules.py` | Every built-in diagnosis rule: trigger, conclusion, confidence, severity, timeline; every RCA complete |
 | `test_production.py` | New incident types, partial API failures, card retries, liveness, AI backlog, bounded sessions, busy replies, hidden env values, name validation, redaction, the deadline, the closed internal API, supervised servers |

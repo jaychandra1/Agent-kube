@@ -30,7 +30,7 @@ In the channel that has the kubesupport outgoing webhook, type `@`, pick **kubes
 | `@kubesupport pods payments` | Pods with ready count, phase, restarts and waiting reason |
 | `@kubesupport events payments` | The 15 most recent Kubernetes events |
 | `@kubesupport logs payments/api-7d9f8b-x` | The last 60 log lines (`--previous` = the crashed container) |
-| `@kubesupport get services payments` | Any kind of object in a namespace (or all namespaces without one): `get ingresses`, `get nodes`, `get pvc payments`, `get crd`, … |
+| `@kubesupport get services payments` | Any kind of object in a namespace (or all namespaces without one): `get ingresses`, `get nodes`, `get pvc payments`, `get crd`, … Ingresses show every URL with its backend service and the load balancer address; Services show ports and the external address. |
 | `@kubesupport get deployment payments/api` | One object in full (cluster-wide kinds: `get node <name>`) |
 | `@kubesupport activity` | The latest cluster activity |
 | `@kubesupport rca payments/api-7d9f8b-x` | A full RCA card for that pod |
@@ -38,7 +38,8 @@ In the channel that has the kubesupport outgoing webhook, type `@`, pick **kubes
 | `@kubesupport <any question>` | The AI model's answer, from the live cluster (needs an AI provider) |
 
 - **Quick commands** (`help`, `status`, `pods`, `events`, `logs`, `get`, `activity`) are answered in the thread within seconds.
-- **Questions and `rca`** get "Looking into it…" at once; the answer arrives as a card in the channel a little later (seconds with a paid provider, minutes on a free plan).
+- **Questions and `rca`** get "Looking into it…" at once; the answer card follows a little later (seconds with a paid provider, minutes on a free plan). It lands **in the same thread** when the answers workflow replies to `threadMessageId` ([INSTALLATION.md, Step 4.2](INSTALLATION.md#42-answers-in-the-questions-channel--t2)); otherwise it's a new post in the channel.
+- **Answers contain the cluster's real data**, not instructions. Ask "which ingress URLs do we expose?" and you get the URLs, their backend services and the load balancer addresses. kubesupport sees one cluster, the one it runs in, so you never need to say which.
 - Questions in the same thread share a conversation, so you can ask follow-ups.
 - Secrets can never be read: `get secrets` is refused.
 - With `TEAMS_TENANT_ID` / `TEAMS_ALLOWED_USER_IDS` set, other people get a polite refusal and nothing runs.

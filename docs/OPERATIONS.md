@@ -62,6 +62,8 @@ curl -s localhost:8080/alerts/status -H "x-api-key: $KEY"
 | Alerts stopped after a while | Workflows run under the account of the person who created them. If that account was disabled or its connection expired, recreate the workflow and update the URL. |
 | Teams says "Sorry, there was a problem…" after `@kubesupport` | Wrong security token (agent log: `Rejected /teams/webhook call…`), Cloudflare blocked the call (**Security → Events** in Cloudflare), or the tunnel is down. `curl -i -X POST https://<host>/teams/webhook` should give **401**. |
 | "Looking into it…" but no answer card | `TEAMS_REPLY_WEBHOOK_URL` is wrong or that workflow is off (agent log: `Teams target … returned …`), or the AI provider failed (agent log). |
+| Answers arrive as a new post, not in the question's thread | The answers workflow still uses "Post card in a chat or channel". Change it to "Reply with an adaptive card in a channel" with Message ID `triggerBody()?['threadMessageId']` ([INSTALLATION.md, Step 4.2](INSTALLATION.md#42-answers-in-the-questions-channel--t2)). |
+| The AI answers with `kubectl` commands instead of data | An older image (Cursor's agent had no tools), or a weak model. Deploy the current image; see [AI_PROVIDERS.md](AI_PROVIDERS.md#troubleshooting). `@kubesupport get ingresses` and the other quick commands always return real data. |
 | "No AI model is configured" | `/alerts/status` → `llm.status` names the missing setting. See [AI_PROVIDERS.md](AI_PROVIDERS.md#troubleshooting). |
 | RCAs are rule-based although a provider is set | `llm_error` in a `/rca` response, or the agent log (`LLM investigation failed`): wrong key, model not available, the provider's rate or daily limit, or `MAX_LLM_RCA_PER_HOUR` reached. |
 | AI answers take minutes | Normal on free plans: kubesupport waits out the per-minute token limit (log: `Model API returned 429; retrying in …`). |
@@ -95,7 +97,7 @@ Logs worth knowing:
 | 1 | **Questions only from a standard channel** | Outgoing webhooks don't work in chats or private channels. Alerts and long answers *can* go to chats and private channels. A 1:1 chat with the agent would need a registered Teams bot (Azure Bot Service). |
 | 2 | **No source-control or CI lookups** | The AI sees the cluster only; it can't read commits or pipelines. A read-only Git/Bitbucket tool could be added in `tools.py` (with a read-only token), and named in the AI's rules. |
 | 3 | **State is in memory** | Open incidents and chat history are lost when the pod restarts; the startup card covers the gap. Keep `replicas: 1`. |
-| 4 | **Teams limits** | Replies to an outgoing webhook must come within 5 s, so long answers are separate channel posts. Workflows have request limits, so an alert storm can be throttled. |
+| 4 | **Teams limits** | Replies to an outgoing webhook must come within 5 s, so long answers come through a workflow. They land in the question's thread only after the one-time workflow change in [INSTALLATION.md, Step 4.2](INSTALLATION.md#42-answers-in-the-questions-channel--t2). Workflows have request limits, so an alert storm can be throttled. |
 | 5 | **Rule-based RCAs are generic** | They recognise common failure types only. An AI provider gives real root causes. |
 | 6 | **`scan_cluster_for_issues` uses the old rule** | This tool (used by `cli.py scan` and offered to the model) flags any pod that *ever* restarted; the watcher uses `detect_incidents`. |
 | 7 | **`/rca/latest`** | Only the last RCA from the current pod, and only internally. |

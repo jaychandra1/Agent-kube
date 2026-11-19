@@ -19,7 +19,7 @@ For a Secret value, see *Change a secret* in [OPERATIONS.md](OPERATIONS.md#day-t
 | `LLM_API_KEY` | – | API key of the AI provider chosen with `LLM_PROVIDER`. The provider's own name works too (`GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `CURSOR_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `MISTRAL_API_KEY`, `OLLAMA_API_KEY`) and wins when both are set. |
 | `AGENT_API_KEY` | – | Required `x-api-key` header for the internal API. Without it the internal API is **off** (403): nothing can trigger RCAs or Teams posts through it. |
 | `TEAMS_ALERT_WEBHOOK_URLS` | – | Workflows webhook URL(s) for alerts: chats, standard or private channels. Comma-separated; each entry optionally `name=URL` (the name appears in logs instead of the URL). Without it no alerts are sent. |
-| `TEAMS_REPLY_WEBHOOK_URL` | first alert URL | Workflows webhook of the questions channel, for answers that take longer than 5 s |
+| `TEAMS_REPLY_WEBHOOK_URL` | first alert URL | Workflows webhook of the questions channel, for answers that take longer than 5 s. Each answer carries `threadMessageId` and `channelId`, so the workflow can reply in the question's thread. |
 | `TEAMS_OUTGOING_WEBHOOK_SECRET` | – | The outgoing webhook's security token. Without it `/teams/webhook` is off (404). |
 | `TEAMS_ACTIVITY_WEBHOOK_URLS` | the alert targets | Send activity cards somewhere other than the alerts (same format as the alert URLs) |
 

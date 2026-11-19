@@ -142,6 +142,41 @@ def test_main_starts_webhook_only_with_a_certificate(monkeypatch, tmp_path):
     assert main.build_configs()[2] is None
 
 
+def ingress(name, ns, host, paths, tls=False, annotations=None, address="k8s-shop-1234.eu-west-1.elb.amazonaws.com"):
+    return {"metadata": {"name": name, "namespace": ns, "creationTimestamp": "2026-11-01T00:00:00Z",
+                         "annotations": annotations or {}},
+            "spec": {"ingressClassName": "alb", **({"tls": [{"hosts": [host]}]} if tls else {}),
+                     "rules": [{"host": host, "http": {"paths": [
+                         {"path": p, "backend": {"service": {"name": s, "port": {"number": n}}}}
+                         for p, s, n in paths]}}]},
+            "status": {"loadBalancer": {"ingress": [{"hostname": address}] if address else []}}}
+
+
+def test_ingress_listing_gives_urls_backends_and_address():
+    text = tools._ingress_summary(ingress("shop", "apps", "shop.example.com",
+                                          [("/", "web", 80), ("/api", "api", 8080)], tls=True))
+    assert text == ("class alb; address k8s-shop-1234.eu-west-1.elb.amazonaws.com; "
+                    "https://shop.example.com/ -> web:80; https://shop.example.com/api -> api:8080")
+
+
+def test_ingress_scheme_and_missing_address():
+    plain = tools._ingress_summary(ingress("a", "apps", "a.example.com", [("/", "web", 80)], address=None))
+    assert "http://a.example.com/ -> web:80" in plain and "address not assigned yet" in plain
+    acm = tools._ingress_summary(ingress("b", "apps", "b.example.com", [("/", "web", 80)], annotations={
+        "alb.ingress.kubernetes.io/certificate-arn": "arn:aws:acm:eu-west-1:1:certificate/x"}))
+    assert "https://b.example.com/ -> web:80" in acm  # ALB + ACM: HTTPS without spec.tls
+    many = tools._ingress_summary(ingress("c", "apps", "c.example.com", [(f"/p{i}", "web", 80) for i in range(20)]))
+    assert "+5 more routes" in many
+
+
+def test_service_listing_shows_the_external_address():
+    obj = svc("public", "apps")
+    obj["spec"]["type"] = "LoadBalancer"
+    obj["status"] = {"loadBalancer": {"ingress": [{"hostname": "a1b2.elb.amazonaws.com"}]}}
+    assert tools._summary("Service", obj) == "LoadBalancer 10.0.0.1 ports 80/TCP external a1b2.elb.amazonaws.com"
+    assert tools._summary("Service", svc("internal", "apps")) == "ClusterIP 10.0.0.1 ports 80/TCP"
+
+
 def test_tools_offered_to_the_model_include_generic_reads():
     names = {t["name"] for t in tools.TOOL_SCHEMAS}
     assert {"list_resources", "get_resource"} <= names

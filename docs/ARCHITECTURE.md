@@ -206,12 +206,12 @@ sequenceDiagram
         TA-->>MS: "Looking into it..." within 5 seconds
         TA->>A: investigate in a background thread
         A-->>TA: answer or RCA
-        TA->>WH: answer card
-        WH-->>U: card appears in the channel
+        TA->>WH: answer card + threadMessageId
+        WH-->>U: card appears as a reply in the question's thread
     end
 ```
 
-Teams waits at most **5 seconds** for an outgoing webhook's reply, so anything slower is answered through the channel's Workflows webhook.
+Teams waits at most **5 seconds** for an outgoing webhook's reply, so anything slower is answered through the channel's Workflows webhook. kubesupport sends the question's thread (`threadMessageId`) with the card; the workflow's **Reply with an adaptive card in a channel** action puts it under the question ([INSTALLATION.md, Step 4.2](INSTALLATION.md#42-answers-in-the-questions-channel--t2)). A workflow that still uses "Post card" starts a new post instead.
 
 ### 3.3 Cluster activity
 

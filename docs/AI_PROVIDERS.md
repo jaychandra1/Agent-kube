@@ -107,7 +107,7 @@ kubesupport supports two provider shapes ([`providers/base.py`](../agent/provide
 | Shape | Providers | Who runs the investigation loop |
 |---|---|---|
 | **Chat provider** | Claude, and every OpenAI-compatible API (Groq, Gemini, OpenAI, Azure OpenAI, OpenRouter, Mistral, Ollama, custom) | kubesupport: it asks the model, runs the tools the model picks, sends the results back, up to `LLM_MAX_STEPS` times. |
-| **Agent provider** | Cursor | The provider's own agent. kubesupport gives it the question and its read-only tools as *custom tools*; Cursor's built-in tools (shell, files, …) are switched off. |
+| **Agent provider** | Cursor | The provider's own agent. kubesupport gives it the question and its read-only tools as *custom tools*; Cursor's own shell, file and web tools are switched off. |
 
 ### Claude ([`claude.py`](../agent/providers/claude.py))
 - Anthropic Messages API, with the `submit_rca` tool's **strict schema**, so RCAs always have every field.
@@ -125,10 +125,11 @@ kubesupport supports two provider shapes ([`providers/base.py`](../agent/provide
 ### Cursor ([`cursor.py`](../agent/providers/cursor.py))
 - Uses the official Cursor SDK (`cursor-sdk`, included in the image). On Cursor's forum, a Cursor team answer says using the SDK as a backend AI service inside your product is a supported use, billed under the plan of the key's account.
 - Each question or RCA creates a short-lived Cursor agent with:
-  - `tools=[]`: no built-in tools (no shell, no file access); `shell` is also explicitly disallowed;
-  - kubesupport's read-only tools as its only tools, plus `submit_rca`;
+  - `tools=["mcp"]`: Cursor offers custom tools to the model through its `mcp` tool group, so that group is the only one switched on. No shell, no file access, no web; `shell` is also explicitly disallowed. (`tools=[]` would leave the model with no tools at all, able only to answer in text.)
+  - kubesupport's read-only tools as its only tools, plus `submit_rca`: no MCP server is configured, so nothing else is in that group;
   - an empty working folder (`/tmp/kubesupport-cursor`), no project or user settings loaded.
 - The SDK starts a helper process (its "bridge") on first use. `HOME` is `/tmp` in the image, the only writable place in the pod.
+- If the agent answers with `kubectl` instructions without using a tool, it is told once to look the answer up; an RCA submitted without any tool call is rejected and the rules write it instead.
 - One Cursor run at a time; `LLM_TIMEOUT_SECONDS` (default 600) cancels a run that takes too long. If the agent doesn't call `submit_rca`, it is reminded `LLM_MAX_STEPS` times (default 2), then the rules take over.
 - Not verified on a live cluster yet: whether the bridge needs more writable space than `/tmp` under the read-only root filesystem. If Cursor fails at startup, the agent log says why (see Troubleshooting below).
 - Building the image without Cursor: `docker build --build-arg WITH_CURSOR=false agent` (the SDK has a proprietary licence; check Cursor's terms before publishing an image that includes it).
@@ -181,6 +182,7 @@ On a **paid Groq plan**, raise `LLM_MAX_REQUEST_CHARS` and `LLM_TOOL_OUTPUT_CHAR
 | Cursor: `the cursor-sdk package is not in this image` | The image was built with `WITH_CURSOR=false`. |
 | Cursor: `ConfigurationError` / `AuthenticationError` in the log | Wrong or missing `CURSOR_API_KEY` / `LLM_API_KEY`; a repository-scoped Cursor key (use a user or service-account key); or the model name isn't available on your plan (try another `LLM_MODEL`). |
 | Cursor: `Cursor run took longer than …` | Raise `LLM_TIMEOUT_SECONDS`. |
+| Cursor answers with `kubectl` commands or says it "could not run any cluster tools" | The pod runs an older image in which the agent's tools were switched off (`tools=[]`). Deploy the current image. The log line `still used no cluster tool` means the agent still isn't reaching the tools. |
 | Cursor fails right after start with a file-system error | The SDK's helper wants to write outside `/tmp`. Report it, and meanwhile use another provider. |
 | Azure OpenAI: HTTP 404 | `LLM_MODEL` must be the **deployment name**, and `LLM_BASE_URL` must end in `/openai/v1`. |
 | Outbound traffic is restricted | Allow HTTPS to the provider's host: `api.groq.com`, `api.anthropic.com`, `generativelanguage.googleapis.com`, `api.openai.com`, `<resource>.openai.azure.com`, `openrouter.ai`, `api.mistral.ai`. For Cursor, allow the hosts in Cursor's network documentation. |
