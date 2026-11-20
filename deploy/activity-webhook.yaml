@@ -2,16 +2,26 @@
 # kubesupport activity webhook.  DON'T apply this file directly: run
 #   deploy/webhook-cert.sh
 # which creates the TLS certificate, fills in <CA_BUNDLE> below and applies it.
+# Run the script again after changing the rules in this file.
 #
-# The Kubernetes API server sends kubesupport a copy of the requests matched below
-# (exec/attach/port-forward, created/deleted services, apps, jobs, namespaces, RBAC,
-# ServiceAccounts, Secrets, ConfigMaps, and workload updates/scaling), including WHO made them.
+# The Kubernetes API server sends kubesupport a copy of the requests matched below, including
+# WHO made them: exec/attach/port-forward/debug, everything done to workloads (deploys,
+# rollout restarts, image and config changes, scaling), ConfigMaps and Secrets, pods deleted
+# or evicted, nodes, services, ingresses, RBAC, storage, quotas and so on.
 # kubesupport always answers "allowed"; failurePolicy: Ignore means requests go ahead even
 # if kubesupport is down or slow. Nothing is ever blocked or changed.
 #
-# Secrets: the API server includes the whole object in the request; kubesupport keeps only
-# the name. If Secret objects must never reach kubesupport, remove "secrets" from the
-# second rule below and re-run deploy/webhook-cert.sh.
+# What is left out on purpose, so the cluster never waits on kubesupport for its own work:
+#   - requests from the cluster's own components (matchConditions below)
+#   - status updates and the objects that change all the time (events, leases, endpoints)
+# Custom resources (Argo, cert-manager, ...) are not listed either. To watch one, add a rule
+# with its apiGroup and resource; kubesupport reports any kind it is sent.
+#
+# Secrets: the API server includes the whole object in the request. kubesupport keeps the
+# name and how many keys changed, nothing else. If Secret objects must never reach
+# kubesupport, remove "secrets" from the core rule below and re-run deploy/webhook-cert.sh.
+#
+# Needs Kubernetes 1.28 or newer (matchConditions).
 # ----------------------------------------------------------------------
 apiVersion: v1
 kind: Service
@@ -49,37 +59,87 @@ webhooks:
         path: /admission
         port: 443
       caBundle: <CA_BUNDLE>
+    # Skipped at the API server, before the webhook is called: kubelets, the control plane,
+    # the controllers in kube-system and EKS's own managers. These are the same callers as
+    # the first entries of ACTIVITY_IGNORE_USERS; to see one of them, remove it in both places.
+    matchConditions:
+      - name: not-a-kubelet
+        expression: '!request.userInfo.username.startsWith("system:node:")'
+      - name: not-the-control-plane
+        expression: '!request.userInfo.username.startsWith("system:kube-")'
+      - name: not-a-kube-system-controller
+        expression: '!request.userInfo.username.startsWith("system:serviceaccount:kube-system:")'
+      - name: not-eks
+        expression: '!request.userInfo.username.startsWith("eks:")'
     rules:
-      # Executions: someone opened a shell, attached to, or tunnelled into a pod
+      # someone opened a shell, attached to, or tunnelled into a pod
       - operations: ["CONNECT"]
         apiGroups: [""]
         apiVersions: ["v1"]
         resources: ["pods/exec", "pods/attach", "pods/portforward"]
-      # New/deleted services and namespaces; security objects (names only)
+      # kubectl debug (adds a debug container to a running pod)
+      - operations: ["UPDATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods/ephemeralcontainers"]
+      # kubectl drain evicts pods
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods/eviction"]
+      # pods deleted (the manual "restart") or started by hand. Pod updates are left out:
+      # they are status changes made by the cluster.
       - operations: ["CREATE", "DELETE"]
         apiGroups: [""]
         apiVersions: ["v1"]
-        resources: ["services", "namespaces", "serviceaccounts", "configmaps", "secrets"]
-      # Apps: created/deleted, and updates (image changes, replicas)
+        resources: ["pods"]
+      # core objects: created, changed, deleted
+      - operations: ["CREATE", "UPDATE", "DELETE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["configmaps", "secrets", "services", "namespaces", "serviceaccounts", "nodes",
+                    "persistentvolumeclaims", "persistentvolumes", "resourcequotas", "limitranges"]
+      # apps: deploys, rollout restarts, image / env / resource changes
       - operations: ["CREATE", "UPDATE", "DELETE"]
         apiGroups: ["apps"]
         apiVersions: ["v1"]
         resources: ["deployments", "statefulsets", "daemonsets"]
-      # Scaling with `kubectl scale` (the /scale subresource)
+      # kubectl scale (the /scale subresource)
       - operations: ["UPDATE"]
         apiGroups: ["apps"]
         apiVersions: ["v1"]
-        resources: ["deployments/scale", "statefulsets/scale"]
-      - operations: ["CREATE", "DELETE"]
+        resources: ["deployments/scale", "statefulsets/scale", "replicasets/scale"]
+      - operations: ["CREATE", "UPDATE", "DELETE"]
         apiGroups: ["batch"]
         apiVersions: ["v1"]
         resources: ["jobs", "cronjobs"]
-      - operations: ["CREATE", "DELETE"]
+      - operations: ["CREATE", "UPDATE", "DELETE"]
         apiGroups: ["networking.k8s.io"]
         apiVersions: ["v1"]
-        resources: ["ingresses"]
-      # Permission changes
+        resources: ["ingresses", "ingressclasses", "networkpolicies"]
+      - operations: ["CREATE", "UPDATE", "DELETE"]
+        apiGroups: ["autoscaling"]
+        apiVersions: ["v2"]
+        resources: ["horizontalpodautoscalers"]
+      - operations: ["CREATE", "UPDATE", "DELETE"]
+        apiGroups: ["policy"]
+        apiVersions: ["v1"]
+        resources: ["poddisruptionbudgets"]
+      # permission changes
       - operations: ["CREATE", "UPDATE", "DELETE"]
         apiGroups: ["rbac.authorization.k8s.io"]
         apiVersions: ["v1"]
         resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+      - operations: ["CREATE", "UPDATE", "DELETE"]
+        apiGroups: ["storage.k8s.io"]
+        apiVersions: ["v1"]
+        resources: ["storageclasses"]
+      - operations: ["CREATE", "UPDATE", "DELETE"]
+        apiGroups: ["scheduling.k8s.io"]
+        apiVersions: ["v1"]
+        resources: ["priorityclasses"]
+      # new or removed custom resource types
+      - operations: ["CREATE", "UPDATE", "DELETE"]
+        apiGroups: ["apiextensions.k8s.io"]
+        apiVersions: ["v1"]
+        resources: ["customresourcedefinitions"]

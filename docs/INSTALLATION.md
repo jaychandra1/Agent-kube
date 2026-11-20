@@ -387,22 +387,30 @@ kubectl auth can-i create deployments   --as=$SA -n default         # no
 
 ---
 
-## Step 7b — Activity notices (exec, new services, security changes, updates)
+## Step 7b — Activity notices (deploys, restarts, config changes, exec, …)
 
 kubesupport can tell you **who** did what in the cluster:
 
 | Reported | Example line in Teams |
 |---|---|
-| Exec / attach / port-forward into a pod | `alice@corp exec into pod payments/api-7d9f8b-x (container app): sh` |
-| Created/deleted Services, Ingresses, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Namespaces | `Created Service payments/api-public by alice@corp` |
-| Security: Roles/Bindings/ClusterRoles/ClusterRoleBindings created/changed/deleted; ServiceAccounts, Secrets, ConfigMaps created/deleted (names only) | `Created ClusterRoleBinding temp-admin by bob@corp` |
-| Workload updates: image changes, scaling | `Updated Deployment payments/api image app: api:1.2 → api:1.3 by ci-deployer` |
+| Exec / attach / port-forward into a pod, and `kubectl debug` containers | `alice@corp exec into pod payments/api-1 (container app): sh` |
+| Rollout restarts | `Restarted Deployment payments/api (rollout restart) by alice@corp` |
+| Every other change to a Deployment, StatefulSet or DaemonSet: images, environment variables (names only), resources, anything else in the pod template, strategy, pause and resume | `Updated Deployment payments/api (image app: api:1.2 → api:1.3; env app: LOG_LEVEL) by ci-deployer` |
+| Scaling | `Scaled Deployment payments/api 2 → 5 by alice@corp` |
+| Helm installs and upgrades | `Helm install/upgrade of payments/api (revision 12) by alice@corp` |
+| ConfigMaps created, changed, deleted: the keys that changed, never the values | `Changed ConfigMap payments/api-config (keys: LOG_LEVEL) by alice@corp` |
+| Secrets created, changed, deleted: the name and how many keys changed, nothing else | `Changed Secret payments/db (1 key(s) changed) by bob@corp` |
+| Pods deleted or started by hand, and evictions (`kubectl drain`) | `Deleted Pod payments/api-7d9f8b-x by alice@corp` |
+| Nodes cordoned, uncordoned, changed or deleted | `Cordoned Node ip-10-0-1-1 by alice@corp` |
+| RBAC, ServiceAccounts, NetworkPolicies and CustomResourceDefinitions created, changed, deleted | `Created ClusterRoleBinding temp-admin by bob@corp` |
+| Every other kind in the webhook rules, created, changed, deleted: Services, Ingresses, Namespaces, Jobs, CronJobs, PVCs, PVs, HPAs, PodDisruptionBudgets, quotas, storage and priority classes. A change names the fields, labels or annotations that differ. | `Changed Service payments/api (spec.type) by alice@corp` |
 
 **How it works:**
 
 - The Kubernetes API server sends kubesupport a copy of those requests through a *validating admission webhook*.
 - kubesupport **always answers "allowed"**. With `failurePolicy: Ignore`, nothing is ever blocked, even if kubesupport is down.
-- Changes made by Kubernetes' and EKS's own components are filtered out (pods created by a Deployment, for example).
+- Changes made by Kubernetes' and EKS's own components are filtered out (the pods a rollout replaces, for example), so you see what people and pipelines did.
+- Lines carry names only: which keys of a ConfigMap changed, never their values; for a Secret just the name and how many keys changed.
 - Everything from one minute is grouped into **one "Cluster activity" card**, sent to the same Teams targets as alerts.
 
 ### 7b.1 Run the setup script
@@ -450,9 +458,11 @@ kubectl -n default delete service kubesupport-test
 > - the EKS control plane can't reach the pod on port **8443**. Managed node groups using the cluster security group allow this. With custom node security groups, add an inbound rule for TCP 8443 from the cluster security group (`aws eks describe-cluster --name <W2> --query cluster.resourcesVpcConfig.clusterSecurityGroupId`);
 > - your `kubectl` requests go ahead regardless.
 >
-> **Secrets:** Kubernetes includes the whole object in the webhook request; kubesupport keeps only the Secret's *name*. If Secret objects must never reach kubesupport, delete `"secrets"` from the second rule in `deploy/activity-webhook.yaml` and run the script again.
+> **Secrets:** Kubernetes includes the whole object in the webhook request; kubesupport keeps only the Secret's *name*. If Secret objects must never reach kubesupport, delete `"secrets"` from the core rule in `deploy/activity-webhook.yaml` and run the script again.
 >
-> **Noise:** to stop reporting a busy automation account, add its name prefix to `ACTIVITY_IGNORE_USERS` in the ConfigMap (e.g. `system:serviceaccount:argocd:`), apply, restart.
+> **Noise:** to stop reporting a busy automation account, add its name prefix to `ACTIVITY_IGNORE_USERS` in the ConfigMap (e.g. `system:serviceaccount:argocd:`), or a kind to `ACTIVITY_IGNORE_KINDS` (e.g. `Pod,Job`), apply, restart.
+>
+> **Upgrading:** the webhook rules live in the cluster. After deploying an image that reports new kinds of activity, run `bash deploy/webhook-cert.sh` once more so the API server sends them.
 
 ---
 

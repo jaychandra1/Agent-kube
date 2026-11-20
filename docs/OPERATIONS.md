@@ -21,6 +21,7 @@ In the commands below, `<you>` is your Docker Hub user, and `$KEY` / the port-fo
 | **Pause alerts** | `WATCH_ENABLED: "false"`, apply, restart |
 | **Pause activity notices** | `ACTIVITY_ENABLED: "false"`, apply, restart. To remove the webhook completely: `kubectl delete validatingwebhookconfiguration kubesupport-activity` |
 | **Renew the activity webhook certificate** | `bash deploy/webhook-cert.sh` (any time; valid 10 years) |
+| **Change what activity is reported** | Edit the rules in `deploy/activity-webhook.yaml` (add a custom resource, drop a kind), then `bash deploy/webhook-cert.sh`. Needed once after upgrading to an image with new activity types, too: the rules live in the cluster, not in the image. |
 | **Update cloudflared** | Change the image tag in `deploy/cloudflare-tunnel.yaml` to a newer release (Docker Hub `cloudflare/cloudflared` tags), then `kubectl apply -f deploy/cloudflare-tunnel.yaml`. The two pods are replaced one at a time, so questions keep working. |
 | **Rotate the tunnel token** (e.g. it leaked) | Delete the tunnel in Cloudflare and redo INSTALLATION.md Steps 8.1, 8.2 and 8.4 with a new one; recreate Secret `kubesupport-tunnel` and `kubectl -n kubesupport rollout restart deploy/kubesupport-tunnel` |
 | **Rotate the Teams outgoing-webhook token** | Delete and recreate the outgoing webhook in Teams (INSTALLATION.md, Step 4.3), then update `TEAMS_OUTGOING_WEBHOOK_SECRET` and restart |
@@ -98,7 +99,9 @@ curl -s localhost:8080/alerts/status -H "x-api-key: $KEY"
 | Too many incident alerts | Narrow `ALLOWED_NAMESPACES`, or raise `ALERT_COOLDOWN_MINUTES`. |
 | Pod never created; events say `violates PodSecurity "restricted"` for `opentelemetry-auto-instrumentation-…` | The CloudWatch Observability add-on is injecting OpenTelemetry containers. The manifests opt out with `instrumentation.opentelemetry.io/inject-*: "false"`; details in [INSTALLATION.md](INSTALLATION.md#troubleshooting). |
 | No activity cards | `/activity/status`: `webhook_certificate: false` → run `webhook-cert.sh`. `webhook_calls_total: 0` → the EKS control plane can't reach port 8443; allow it from the cluster security group. Calls arrive but no card → the actions came from ignored callers, or the targets fail (`/alerts/test`). |
-| Activity cards too noisy | Add the busy caller's prefix to `ACTIVITY_IGNORE_USERS` (e.g. `system:serviceaccount:argocd:`) or a namespace to `ACTIVITY_IGNORE_NAMESPACES`. |
+| Activity cards too noisy | The card names the caller of every line. Add a busy automation account's prefix to `ACTIVITY_IGNORE_USERS` (e.g. `system:serviceaccount:argocd:`), a namespace to `ACTIVITY_IGNORE_NAMESPACES`, or a kind to `ACTIVITY_IGNORE_KINDS` (e.g. `Pod,Job`). |
+| Rollout restarts or ConfigMap changes are not reported | The cluster still has the old webhook rules: run `bash deploy/webhook-cert.sh` once. Check with `kubectl get validatingwebhookconfiguration kubesupport-activity -o yaml` that `configmaps` and `UPDATE` are in the rules. |
+| `webhook-cert.sh` fails with `unknown field "matchConditions"` | The cluster is older than Kubernetes 1.28. Delete the `matchConditions` block from `deploy/activity-webhook.yaml`; `ACTIVITY_IGNORE_USERS` still filters the same callers. |
 | Tunnel pods not Ready / Cloudflare error 1033 or 502 | See the tunnel rows in [INSTALLATION.md](INSTALLATION.md#troubleshooting). |
 | The pod restarts every few minutes; events say `Liveness probe failed ... 503` | `curl localhost:8080/healthz` (port-forward) shows the problem: a scan that never finishes (the Kubernetes API is unreachable or very slow) or a dead Teams server. Check the agent log before the restart: `kubectl -n kubesupport logs deploy/kubesupport --previous`. |
 | `/alerts/status` and other internal endpoints answer 403 | `AGENT_API_KEY` isn't in the Secret: the internal API is off until it is. |
@@ -140,6 +143,7 @@ Logs worth knowing:
 | 14 | **Cursor depends on a bundled helper program** | The Cursor SDK runs its own Node.js helper inside the pod (about 175 MB of the image). It starts fine under the pod's restrictions (read-only filesystem, non-root), but its packages are Cursor's to update; the image build patches the one with known vulnerabilities ([SECURITY.md](SECURITY.md#2-the-image)). |
 | 15 | **Activity events can be faked from inside the cluster** | Port 8443 can't be limited to the API server's (changing) addresses, so a pod could post a made-up event. Confirm important ones in the EKS audit logs. |
 | 16 | **Boundaries recognise wording** | The question filter knows English phrasing and can refuse an ordinary question by mistake or miss an unusual one; the AI's rule covers other wording and languages but is a model's judgement. What can't be worked around is the tool block: kubesupport's namespace and all Secrets are unreadable through Teams. Everyone is restricted, administrators included; refusals are kept in memory only (and in the pod's log). |
+| 17 | **Activity is reported when requested** | The webhook sees a request before it is stored, so a line can describe something that was refused a moment later (an eviction blocked by a PodDisruptionBudget, a quota). Custom resources, pod updates and status changes are not reported. |
 
 ---
 

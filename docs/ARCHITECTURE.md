@@ -228,16 +228,16 @@ sequenceDiagram
     participant K as Kubernetes API server
     participant H as kubesupport :8443 (activity.py)
     participant T as Teams (alert targets)
-    Admin->>K: kubectl exec / create service / change ClusterRoleBinding ...
+    Admin->>K: kubectl rollout restart / edit configmap / exec / delete pod ...
     K->>H: AdmissionReview (who, what, where)
     H-->>K: allowed (always, at once)
     K-->>Admin: request carries on as normal
-    H->>H: filter noise (system callers, dry runs, no-op updates)
+    H->>H: work out what changed (names only), drop noise
     Note over H: collected for ACTIVITY_BATCH_SECONDS (60)
-    H->>T: one "Cluster activity" card (exec and RBAC first)
+    H->>T: one "Cluster activity" card (exec and security first)
 ```
 
-The webhook is registered with `failurePolicy: Ignore` and a 3-second timeout, so nothing in the cluster is ever blocked, even when kubesupport is down.
+The webhook is registered with `failurePolicy: Ignore` and a 3-second timeout, so nothing in the cluster is ever blocked, even when kubesupport is down. Requests from the cluster's own components (kubelets, control plane, `kube-system` controllers) are not sent to it at all, and neither are status updates, Events, Leases or Endpoints: what reaches kubesupport is what people and pipelines do. The full list of what is reported is in [RULES.md, section 5](RULES.md#5-activity-what-is-reported).
 
 ### 3.4 Investigation with an AI provider
 

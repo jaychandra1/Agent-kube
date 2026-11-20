@@ -157,24 +157,36 @@ Tests: `test_rules.py`. Every rule is exercised, and every RCA must pass `normal
 
 | Reported | Example |
 |---|---|
-| Exec / attach / port-forward into a pod | `alice@corp exec into pod payments/api-1 (container app): sh` |
-| Created or deleted Services, Ingresses, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Namespaces | `Created Service payments/api-public by alice@corp` |
-| RBAC created/changed/deleted; ServiceAccounts, Secrets, ConfigMaps created/deleted (names only) | `Created ClusterRoleBinding temp-admin by bob@corp` |
-| Image changes and scaling | `Updated Deployment payments/api image app: api:1.2 → api:1.3 by ci-deployer` |
+| Exec / attach / port-forward into a pod, and `kubectl debug` containers | `alice@corp exec into pod payments/api-1 (container app): sh` |
+| Rollout restarts | `Restarted Deployment payments/api (rollout restart) by alice@corp` |
+| Every other change to a Deployment, StatefulSet or DaemonSet: images, environment variables (names only), resources, anything else in the pod template, strategy, pause and resume | `Updated Deployment payments/api (image app: api:1.2 → api:1.3; env app: LOG_LEVEL) by ci-deployer` |
+| Scaling | `Scaled Deployment payments/api 2 → 5 by alice@corp` |
+| Helm installs and upgrades | `Helm install/upgrade of payments/api (revision 12) by alice@corp` |
+| ConfigMaps created, changed, deleted: the keys that changed, never the values | `Changed ConfigMap payments/api-config (keys: LOG_LEVEL) by alice@corp` |
+| Secrets created, changed, deleted: the name and how many keys changed, nothing else | `Changed Secret payments/db (1 key(s) changed) by bob@corp` |
+| Pods deleted or started by hand, and evictions (`kubectl drain`) | `Deleted Pod payments/api-7d9f8b-x by alice@corp` |
+| Nodes cordoned, uncordoned, changed or deleted | `Cordoned Node ip-10-0-1-1 by alice@corp` |
+| RBAC, ServiceAccounts, NetworkPolicies and CustomResourceDefinitions created, changed, deleted | `Created ClusterRoleBinding temp-admin by bob@corp` |
+| Every other kind in the webhook rules, created, changed, deleted: Services, Ingresses, Namespaces, Jobs, CronJobs, PVCs, PVs, HPAs, PodDisruptionBudgets, quotas, storage and priority classes. A change names the fields, labels or annotations that differ. | `Changed Service payments/api (spec.type) by alice@corp` |
 
 **Not reported:**
-- callers matching `ACTIVITY_IGNORE_USERS` (Kubernetes' and EKS's own components, and kubesupport itself);
-- dry runs;
-- updates that change neither an image nor a replica count;
-- namespaces in `ACTIVITY_IGNORE_NAMESPACES`.
+- **The cluster's own work:** kubelets, the control plane, the controllers in `kube-system` and EKS's managers. They are filtered twice, at the API server (`matchConditions` in the webhook) and by `ACTIVITY_IGNORE_USERS`. So the pods a rollout replaces, or a Job its CronJob starts, produce no lines; only the person's action does.
+- **Dry runs.**
+- **Updates with no visible change:** status, `managedFields`, and annotations that change on their own (`last-applied-configuration`, revision numbers).
+- **Ignored namespaces and kinds:** `ACTIVITY_IGNORE_NAMESPACES`, `ACTIVITY_IGNORE_KINDS`.
+- **Never sent to the webhook:** status updates, pod updates, Events, Leases, Endpoints. They change constantly, and kubesupport must not sit in the path of that traffic.
+- **Custom resources** (Argo, cert-manager, …), unless you add a rule for them in `deploy/activity-webhook.yaml`. kubesupport reports any kind it is sent.
+- **Admission webhook configurations.** Kubernetes never sends changes to those to a webhook.
 
 **Limits:**
-- Credentials in exec commands are redacted.
-- At most 30 lines per card, exec and security first.
-- At most 2,000 events wait between two cards; more are counted and dropped.
-- The webhook always answers "allowed" and never blocks anything.
+- **Names only.** A line names objects, fields, keys, labels and environment variables, never a value. Credentials in exec commands are redacted.
+- **Reported when requested.** The webhook sees a request before it is stored. If something refuses it afterwards (a PodDisruptionBudget for an eviction, a quota, another admission webhook), the line was still sent. That is why an eviction reads "requested".
+- **Repeats are folded:** the same line several times in one batch is shown once, with "(x3)".
+- **At most 30 lines per card,** in this order: exec, security, ConfigMaps and Secrets, deployments and restarts, pods, nodes, created/deleted, other changes.
+- **At most 2,000 events** wait between two cards; more are counted and dropped.
+- **Nothing is blocked.** The webhook always answers "allowed".
 
-Tests: `test_activity.py`, and the activity tests in `test_production.py`.
+Tests: `test_activity.py`, the webhook tests in `test_manifests.py`, and the activity tests in `test_production.py`.
 
 ---
 

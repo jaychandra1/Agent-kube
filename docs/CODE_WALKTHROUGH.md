@@ -132,8 +132,8 @@ Liveness: `Watcher.healthy()` is false when no scan finished for 5 intervals (at
 | Step | Code | What happens |
 |---|---|---|
 | 1 | [`activity.webhook_app`](../agent/activity.py) `POST /admission` | Always answers `allowed: true` with the request's `uid`, immediately. |
-| 2 | `activity.parse_admission` | Exec/attach/port-forward; created/deleted Services, workloads, Jobs, Namespaces; RBAC changes; ServiceAccounts/Secrets/ConfigMaps created or deleted (name only); image changes and scaling. Ignores dry runs, ignored callers and namespaces, and updates that change nothing relevant. |
-| 3 | `ActivityFeed.record` / `flush` | Batches for `ACTIVITY_BATCH_SECONDS`; exec and RBAC first; at most 30 lines per card. |
+| 2 | `activity.parse_admission` → `_classify` | Filters dry runs, ignored callers, namespaces and kinds, then sorts the request: pod subresources (exec, attach, port-forward, debug, eviction), `scale`, updates (`_updated`), creates and deletes. `_workload_changes` and `_restarted` compare two versions of a workload (rollout restart, images, env names, resources, the rest of the pod template); `_object_changes` does it for any other kind (changed fields, data keys, labels, annotations). Only names are copied, never values; an update with no visible change gives no event. |
+| 3 | `ActivityFeed.record` / `flush` | Batches for `ACTIVITY_BATCH_SECONDS`; sections in the order of `CATEGORY_TITLES` (exec and security first); identical lines folded into one with a count; at most 30 lines per card. |
 | 4 | `cards.activity_card` → `teams.post_card` | To `TEAMS_ACTIVITY_WEBHOOK_URLS`, or the alert targets. |
 
 ---
@@ -149,7 +149,7 @@ Liveness: `Watcher.healthy()` is false when no scan finished for 5 intervals (at
 | `test_teams.py` | HMAC, commands, 5-second rule, tenant/user checks, posting with retries |
 | `test_app.py` | API endpoints, API key, the Teams-only app on 8080 |
 | `test_cards.py` | Card contents and size guard |
-| `test_activity.py` | Admission parsing, filters, batching, webhook replies |
+| `test_activity.py` | Admission parsing for every event type (restarts, workload changes, ConfigMaps and Secrets without values, pods, nodes, Helm, any other kind), filters, batching, webhook replies |
 | `test_resources.py` | Generic `list_resources` / `get_resource`, Secrets refused, server start-up |
 | `test_agent.py` | Tool loop, reminders, fallback to rules, rule-based RCAs, `normalize_rca`, history trimming |
 | `test_boundaries.py` | Questions that must be refused and questions that must pass; the tool block for commands and for the AI (both provider shapes); rule 13 only for Teams; the administrators' card, its rate limit and redaction; no setup details in cards and error messages; `/security/restricted` |

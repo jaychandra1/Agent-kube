@@ -190,14 +190,44 @@ def test_every_resource_the_webhook_sends_is_understood():
     for rule in vwc["webhooks"][0]["rules"]:
         for res in rule["resources"]:
             base, _, sub = res.partition("/")
-            op = rule["operations"][0]
-            req = {"uid": "u", "operation": op, "resource": {"resource": base}, "subResource": sub,
-                   "kind": {"kind": "X"}, "namespace": "default", "name": "n", "userInfo": {"username": "alice"},
-                   "object": {"spec": {"replicas": 3}}, "oldObject": {"spec": {"replicas": 1}}}
-            if op == "UPDATE" and not sub and base not in activity.RBAC:
-                req["object"] = {"spec": {"template": {"spec": {"containers": [{"name": "c", "image": "b"}]}}}}
-                req["oldObject"] = {"spec": {"template": {"spec": {"containers": [{"name": "c", "image": "a"}]}}}}
-            assert activity.parse_admission({"request": req}), f"{op} {res} produced no event"
+            for op in rule["operations"]:
+                req = {"uid": "u", "operation": op, "resource": {"resource": base}, "subResource": sub,
+                       "kind": {"kind": "X"}, "namespace": "default", "name": "n", "userInfo": {"username": "alice"},
+                       "object": {"spec": {"replicas": 3}}, "oldObject": {"spec": {"replicas": 1}}}
+                assert activity.parse_admission({"request": req}), f"{op} {res} produced no event"
+
+
+def test_activity_webhook_covers_what_people_do():
+    (vwc,) = by_kind(WEBHOOK_DOCS, "ValidatingWebhookConfiguration")
+    seen = {(res, op) for rule in vwc["webhooks"][0]["rules"] for res in rule["resources"] for op in rule["operations"]}
+    for res in ("deployments", "statefulsets", "daemonsets", "configmaps", "secrets", "services", "nodes", "ingresses",
+                "cronjobs", "clusterrolebindings", "networkpolicies", "persistentvolumeclaims"):
+        assert {(res, "CREATE"), (res, "UPDATE"), (res, "DELETE")} <= seen, res
+    assert {("pods", "DELETE"), ("pods/eviction", "CREATE"), ("pods/ephemeralcontainers", "UPDATE"),
+            ("deployments/scale", "UPDATE"), ("pods/exec", "CONNECT")} <= seen
+
+
+def test_activity_webhook_stays_out_of_the_clusters_own_work():
+    """With failurePolicy Ignore nothing is blocked, but a slow kubesupport would still slow
+    down every matched request. So the cluster's own callers and its busiest objects never
+    reach the webhook."""
+    (vwc,) = by_kind(WEBHOOK_DOCS, "ValidatingWebhookConfiguration")
+    (hook,) = vwc["webhooks"]
+    conditions = hook["matchConditions"]
+    assert len({c["name"] for c in conditions}) == len(conditions)
+    skipped = set()
+    for c in conditions:
+        (prefix,) = re.findall(r'^!request\.userInfo\.username\.startsWith\("([^"]+)"\)$', c["expression"])
+        skipped.add(prefix)
+    assert skipped == {"system:node:", "system:kube-", "system:serviceaccount:kube-system:", "eks:"}
+    assert skipped <= set(activity.DEFAULT_IGNORE_USERS.split(","))  # the code ignores them too
+
+    resources = [res for rule in hook["rules"] for res in rule["resources"]]
+    assert not any("*" in value for rule in hook["rules"] for key in ("resources", "apiGroups", "operations")
+                   for value in rule[key])
+    assert not any(res.endswith("/status") for res in resources)
+    assert not {"events", "leases", "endpoints", "endpointslices", "replicasets", "controllerrevisions"} & set(resources)
+    assert all("UPDATE" not in rule["operations"] for rule in hook["rules"] if "pods" in rule["resources"])
 
 
 def test_old_name_is_gone_everywhere():

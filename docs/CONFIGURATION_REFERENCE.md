@@ -70,8 +70,9 @@ Provider defaults are in the table in [AI_PROVIDERS.md, section 5](AI_PROVIDERS.
 |---|---|---|
 | `ACTIVITY_ENABLED` | `true` | Activity notices on/off (they also need `deploy/webhook-cert.sh`) |
 | `ACTIVITY_BATCH_SECONDS` | `60` | One activity card per this many seconds |
-| `ACTIVITY_IGNORE_USERS` | Kubernetes/EKS components and kubesupport | Comma-separated caller prefixes whose actions aren't reported |
+| `ACTIVITY_IGNORE_USERS` | Kubernetes/EKS components and kubesupport | Comma-separated caller prefixes whose actions aren't reported. The first four defaults are also filtered at the API server (`matchConditions` in `deploy/activity-webhook.yaml`); to see one of those callers, remove it there too and re-run `webhook-cert.sh`. |
 | `ACTIVITY_IGNORE_NAMESPACES` | `kube-node-lease` | Namespaces whose activity isn't reported |
+| `ACTIVITY_IGNORE_KINDS` | `""` | Comma-separated kinds whose activity isn't reported, e.g. `Pod,Job` when a pipeline or operator creates them all day. Exec into pods counts as kind `Pod`. |
 
 ### Teams access
 

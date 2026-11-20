@@ -12,7 +12,7 @@ How people use kubesupport day to day: what arrives in Teams, what you can ask, 
 | **Alert** | A new incident | Severity, workload, problem, root cause, fix steps, confidence, the engine that wrote it (`AI model` or `built-in rules`), and the exact `rca` command for the failing pod |
 | **Still failing** | Every `ALERT_COOLDOWN_MINUTES` (60) while open | A short reminder |
 | **Resolved** | The incident has been gone for `RESOLVE_AFTER_MINUTES` (10) | How long it lasted |
-| **Cluster activity** | At most once per `ACTIVITY_BATCH_SECONDS` (60), when something happened | Who exec'd into a pod, created or deleted services and apps, changed permissions, changed images or replica counts. Exec and permission changes come first, and the card is highlighted. |
+| **Cluster activity** | At most once per `ACTIVITY_BATCH_SECONDS` (60), when something happened | Who did what: deploys, rollout restarts and scaling, ConfigMap and Secret changes, deleted or evicted pods, node cordons, exec into pods, permission changes, and any other object created, changed or deleted ([full list](RULES.md#5-activity-what-is-reported)). Exec and permission changes come first, and the card is highlighted. |
 | **Answer / RCA** | After a question or `rca` command | The answer, or a full RCA card, posted in the questions channel |
 
 Severity colours: SEV1 red (attention), SEV2 orange (warning), SEV3 blue (accent), SEV4 green (good).

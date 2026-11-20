@@ -6,7 +6,7 @@
 - **Watches** for crash loops, OOM kills, image-pull failures, config errors, stuck Pending pods, pods that can't be created, failed Jobs, evictions and NotReady nodes.
 - **Diagnoses** each new incident with the **AI provider of your choice** (Groq, Claude, Cursor, Gemini, OpenAI, Azure OpenAI, OpenRouter, Mistral, Ollama or any OpenAI-compatible API), or with evidence-based built-in rules. One Docker image supports them all; `LLM_PROVIDER` picks one.
 - **Alerts your Microsoft Teams chat and channels** (private channels included) with the root cause and fix steps, then a "Resolved" card when it's over.
-- **Reports cluster activity:** once a minute, *who* exec'd into a pod, created or deleted a service or app, changed permissions, or changed an image or replica count.
+- **Reports what people do in the cluster:** once a minute, *who* deployed, restarted or scaled a workload, changed a ConfigMap or Secret, deleted or evicted a pod, cordoned a node, exec'd into a pod, changed permissions, or created, changed or deleted any other object.
 - **Answers questions in a Teams channel:** `@kubesupport status`, `@kubesupport get services payments`, `@kubesupport activity`, or any question in plain words.
 - **Keeps itself private:** a question about kubesupport's own setup, AI model, rules or namespace gets "You are not authorised to ask this question", and the administrators get a card saying who asked what.
 
